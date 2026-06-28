@@ -68,6 +68,10 @@ MOD_LEFTALT = 0x04
 MOD_LEFTMETA = 0x08
 TURBO_CHORD = MOD_LEFTCTRL | MOD_LEFTALT | MOD_LEFTMETA
 DEBOUNCE_SECS = 2.0
+TT_TOGGLE_EXACT_PATH = "/sys/devices/platform/oxp-platform/tt_toggle"
+TT_TOGGLE_SEARCH_ROOT = "/sys/devices/platform/oxp-platform"
+TT_TOGGLE_RETRY_SECS = 5.0
+TT_TOGGLE_RETRY_INTERVAL_SECS = 0.25
 
 
 def _read_sysfs_text(path):
@@ -99,33 +103,65 @@ def is_superx():
 
 def find_tt_toggle_paths():
     paths = []
-    for path in sorted(glob.glob("/sys/class/hwmon/hwmon*/tt_toggle")):
-        if os.path.exists(path):
+    if os.path.isfile(TT_TOGGLE_EXACT_PATH):
+        paths.append(TT_TOGGLE_EXACT_PATH)
+
+    for root, _, files in os.walk(TT_TOGGLE_SEARCH_ROOT):
+        if "tt_toggle" not in files:
+            continue
+        path = os.path.join(root, "tt_toggle")
+        if path not in paths:
             paths.append(path)
     return paths
 
 
-def enable_tt_toggle():
-    paths = find_tt_toggle_paths()
+def _wait_for_tt_toggle_paths(timeout_secs=TT_TOGGLE_RETRY_SECS):
+    deadline = time.monotonic() + timeout_secs
+    while True:
+        paths = find_tt_toggle_paths()
+        if paths:
+            return paths
+        if time.monotonic() >= deadline:
+            return []
+        time.sleep(TT_TOGGLE_RETRY_INTERVAL_SECS)
+
+
+def enable_tt_toggle(retry=True):
+    paths = _wait_for_tt_toggle_paths() if retry else find_tt_toggle_paths()
     if not paths:
-        _log_warning("tt_toggle sysfs node not found after oxpec load; Turbo watcher remains usable")
-        return {"success": False, "error": "tt_toggle not found", "paths": []}
+        _log_warning(
+            "tt_toggle sysfs node not found after oxpec load. "
+            f"Checked {TT_TOGGLE_EXACT_PATH} and recursively under {TT_TOGGLE_SEARCH_ROOT}"
+        )
+        return {"success": False, "error": "tt_toggle not found", "paths": [], "value": None}
 
     errors = []
+    enabled_paths = []
+    final_value = None
     for path in paths:
         try:
             before = _read_sysfs_text(path)
             with open(path, "w") as f:
                 f.write("1\n")
             after = _read_sysfs_text(path)
-            _log_info(f"tt_toggle enabled: {path} {before!r} -> {after!r}")
+            final_value = after
+            _log_info(f"tt_toggle enabled: path={path} before={before!r} final={after!r}")
+            if after == "1":
+                enabled_paths.append(path)
         except OSError as e:
             errors.append(f"{path}: {e}")
             _log_error(f"Failed to enable tt_toggle at {path}: {e}")
 
+    if enabled_paths:
+        return {"success": True, "paths": enabled_paths, "value": "1"}
     if errors:
-        return {"success": False, "error": "; ".join(errors), "paths": paths}
-    return {"success": True, "paths": paths}
+        return {"success": False, "error": "; ".join(errors), "paths": paths, "value": final_value}
+    return {
+        "success": False,
+        "error": f"tt_toggle did not read back as 1; final value: {final_value!r}",
+        "paths": paths,
+        "value": final_value,
+    }
 
 
 def _hidraw_info(sysfs_path):
@@ -194,6 +230,15 @@ class SuperXTurboMonitor:
 
         if not is_superx():
             _log_warning("Super X Turbo watcher disabled because DMI does not match ONEXPLAYER SUPER X")
+            self._running = False
+            return
+
+        tt_result = enable_tt_toggle(retry=False)
+        if not tt_result.get("success"):
+            _log_warning(
+                "Super X Turbo watcher disabled because tt_toggle is not available/enabled: "
+                f"{tt_result.get('error', 'unknown')}"
+            )
             self._running = False
             return
 

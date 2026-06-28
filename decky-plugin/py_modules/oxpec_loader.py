@@ -63,6 +63,8 @@ _INSTALL_DIR = "/var/lib/oxpec"
 _INSTALL_KO = os.path.join(_INSTALL_DIR, "oxpec.ko")
 _SERVICE_NAME = "oxpec-load.service"
 _SERVICE_PATH = f"/etc/systemd/system/{_SERVICE_NAME}"
+_OXP_PLATFORM_DIR = "/sys/devices/platform/oxp-platform"
+_TT_TOGGLE_EXACT_PATH = os.path.join(_OXP_PLATFORM_DIR, "tt_toggle")
 
 
 def _make_service_content(ko_path):
@@ -109,6 +111,18 @@ def _list_bundled_kernels():
 
 def _find_hwmon():
     """Find the oxpec hwmon device path, if loaded."""
+    for fan_path in sorted(
+        glob_path for glob_path in _glob_paths(os.path.join(_OXP_PLATFORM_DIR, "hwmon", "hwmon*", "fan1_input"))
+    ):
+        hwmon_path = os.path.dirname(fan_path)
+        name_path = os.path.join(hwmon_path, "name")
+        try:
+            with open(name_path) as f:
+                if f.read().strip() == "oxpec":
+                    return hwmon_path
+        except (OSError, IOError):
+            return hwmon_path
+
     hwmon_base = "/sys/class/hwmon"
     if not os.path.isdir(hwmon_base):
         return None
@@ -123,26 +137,51 @@ def _find_hwmon():
     return None
 
 
+def _glob_paths(pattern):
+    import glob
+    return glob.glob(pattern)
+
+
 def _existing_paths(paths):
     """Return paths that currently exist."""
     return [p for p in paths if os.path.exists(p)]
+
+
+def _find_tt_toggle_paths():
+    paths = []
+    if os.path.isfile(_TT_TOGGLE_EXACT_PATH):
+        paths.append(_TT_TOGGLE_EXACT_PATH)
+
+    if os.path.isdir(_OXP_PLATFORM_DIR):
+        for root, _, files in os.walk(_OXP_PLATFORM_DIR):
+            if "tt_toggle" not in files:
+                continue
+            path = os.path.join(root, "tt_toggle")
+            if path not in paths:
+                paths.append(path)
+    return paths
 
 
 def _find_sysfs_nodes():
     """Find fan, charge, and turbo-takeover nodes exposed by oxpec."""
     hwmon_path = _find_hwmon()
     fan_nodes = []
-    turbo_nodes = []
+    turbo_nodes = _find_tt_toggle_paths()
     if hwmon_path:
         fan_nodes = _existing_paths([
             os.path.join(hwmon_path, "fan1_input"),
             os.path.join(hwmon_path, "pwm1"),
             os.path.join(hwmon_path, "pwm1_enable"),
         ])
-        turbo_nodes = _existing_paths([
-            os.path.join(hwmon_path, "tt_toggle"),
-            os.path.join(hwmon_path, "tt_led"),
-        ])
+
+    fan_nodes.extend(
+        p for p in _glob_paths(os.path.join(_OXP_PLATFORM_DIR, "hwmon", "hwmon*", "fan1_input"))
+        if p not in fan_nodes
+    )
+
+    turbo_nodes.extend(
+        p for p in _existing_paths([os.path.join(hwmon_path, "tt_led")]) if hwmon_path and p not in turbo_nodes
+    )
 
     charge_nodes = []
     power_supply_base = "/sys/class/power_supply"

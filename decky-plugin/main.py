@@ -784,17 +784,25 @@ class Plugin:
     def _start_turbo_monitor(self):
         if is_superx_device and not is_superx_device():
             _log_warning("Not starting Turbo watcher because DMI does not match ONEXPLAYER SUPER X")
-            return
+            return {"success": False, "error": "not ONEXPLAYER SUPER X"}
+        tt_result = self._enable_tt_toggle()
+        if not tt_result.get("success"):
+            _log_warning(
+                "Not starting Turbo watcher because tt_toggle is not ready: "
+                f"{tt_result.get('error', 'unknown')}"
+            )
+            return tt_result
         if not self.turbo_monitor:
             if SuperXTurboMonitor:
                 self.turbo_monitor = SuperXTurboMonitor()
             else:
                 _log_warning("Cannot start Turbo watcher — module not loaded")
-                return
+                return {"success": False, "error": "superx_turbo module not loaded"}
         if not self.turbo_monitor.is_running:
             loop = asyncio.get_event_loop()
             self.turbo_monitor.start(loop)
             _log_info("Super X Turbo overlay watcher started")
+        return {"success": True, "message": "Turbo overlay watcher enabled"}
 
     async def _stop_turbo_monitor(self):
         if self.turbo_monitor and self.turbo_monitor.is_running:
@@ -807,8 +815,11 @@ class Plugin:
     async def set_turbo_overlay_enabled(self, enabled: bool):
         self.turbo_overlay_enabled = bool(enabled)
         if self.turbo_overlay_enabled:
-            self._start_turbo_monitor()
-            return {"success": True, "message": "Turbo overlay watcher enabled"}
+            result = self._start_turbo_monitor()
+            if result and not result.get("success"):
+                self.turbo_overlay_enabled = False
+                return result
+            return result or {"success": True, "message": "Turbo overlay watcher enabled"}
         await self._stop_turbo_monitor()
         return {"success": True, "message": "Turbo overlay watcher disabled"}
 
