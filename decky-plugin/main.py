@@ -1,7 +1,7 @@
 """ONEXPLAYER SUPER X Tools — Decky Loader plugin backend.
 
-For v0.1 this plugin exposes only the oxpec EC sensor driver flow used
-to validate SUPER X DMI recognition, fan hwmon nodes, and charge controls.
+For v0.9-beta this plugin focuses Super X support on oxpec EC loading,
+fan/charge sysfs detection, tt_toggle, and Turbo-to-HHD overlay handling.
 
 Each async method in the Plugin class becomes an RPC endpoint that
 the React frontend can call via @decky/api's `callable()`.
