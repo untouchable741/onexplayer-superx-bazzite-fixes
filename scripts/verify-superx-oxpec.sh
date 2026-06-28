@@ -7,7 +7,7 @@ found=0
 
 for ko in "$oxpec_dir"/*/oxpec.ko; do
   [[ -f "$ko" ]] || continue
-  if strings "$ko" | grep -q "ONEXPLAYER SUPER X"; then
+  if grep -a -q "ONEXPLAYER SUPER X" "$ko"; then
     echo "OK: $ko contains ONEXPLAYER SUPER X"
     found=1
   else

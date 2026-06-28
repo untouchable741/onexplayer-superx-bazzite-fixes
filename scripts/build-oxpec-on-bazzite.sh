@@ -19,7 +19,7 @@ echo "Kernel build dir: $kdir"
 make -C "$build_dir" clean KDIR="$kdir"
 make -C "$build_dir" KDIR="$kdir"
 
-if ! strings "$build_dir/oxpec.ko" | grep -q "ONEXPLAYER SUPER X"; then
+if ! grep -a -q "ONEXPLAYER SUPER X" "$build_dir/oxpec.ko"; then
   echo "Built oxpec.ko does not contain ONEXPLAYER SUPER X DMI string" >&2
   exit 1
 fi
