@@ -19,11 +19,6 @@ import decky
 # Add py_modules to path so we can import our helper modules
 sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
 
-# Super X v0.1 intentionally does not apply Apex-specific HHD/controller
-# patches or start the Apex Home/Turbo/back-paddle watchers. Those remain
-# in-tree for later reference once oxpec is confirmed working.
-ENABLE_CONTROLLER_FIXES = False
-
 # Import helper modules with error handling so a single broken module
 # doesn't crash the entire plugin on load.
 
@@ -316,6 +311,18 @@ class Plugin:
     turbo_overlay_enabled = True
     tt_toggle_startup_enabled = True
 
+    def _get_dmi_info(self):
+        if get_superx_dmi_info:
+            return get_superx_dmi_info()
+        return {"board_vendor": None, "board_name": None}
+
+    def _is_superx(self):
+        dmi = self._get_dmi_info()
+        return (
+            dmi.get("board_vendor") == "ONE-NETBOOK"
+            and dmi.get("board_name") == "ONEXPLAYER SUPER X"
+        )
+
     async def _main(self):
         """Plugin entry point — called by Decky on load."""
         try:
@@ -325,20 +332,29 @@ class Plugin:
         _log_info(f"ONEXPLAYER SUPER X Tools starting ({BUILD_ID})")
         _log_info(f"Plugin dir: {decky.DECKY_PLUGIN_DIR}")
         _log_info(f"Log dir: {decky.DECKY_PLUGIN_LOG_DIR}")
-        if get_superx_dmi_info:
-            dmi = get_superx_dmi_info()
-            _log_info(
-                "Detected DMI: "
-                f"vendor={dmi.get('board_vendor') or 'unknown'}, "
-                f"board={dmi.get('board_name') or 'unknown'}"
-            )
+        is_superx = self._is_superx()
+        dmi = self._get_dmi_info()
+        _log_info(
+            "Detected DMI: "
+            f"vendor={dmi.get('board_vendor') or 'unknown'}, "
+            f"board={dmi.get('board_name') or 'unknown'}, "
+            f"superx={is_superx}"
+        )
 
-        # Controller/HHD helpers are disabled for Super X v0.1. This build is
-        # intentionally scoped to oxpec EC recognition and sysfs validation.
+        # Super X is a tablet and does not need the Apex HHD/controller patch
+        # stack. Keep the existing Apex helpers active on non-Super-X devices.
+        if not is_superx:
+            if HomeButtonMonitor:
+                self.home_monitor = HomeButtonMonitor()
+            else:
+                _log_warning("home_button module not available")
+            if BackPaddleMonitor:
+                self.paddle_monitor = BackPaddleMonitor()
+            else:
+                _log_warning("back_paddle module not available")
 
-        # Apex xHCI gamepad recovery is intentionally not run for Super X v0.1.
         hhd_restart_needed = False
-        if False and xhci_check_and_recover:
+        if not is_superx and xhci_check_and_recover:
             try:
                 result = await asyncio.to_thread(xhci_check_and_recover)
                 if result.get("needed") and result.get("success"):
@@ -365,18 +381,17 @@ class Plugin:
             except Exception as e:
                 _log_error(f"oxpec auto-load failed: {e}")
 
-        if self.tt_toggle_startup_enabled:
+        if is_superx and self.tt_toggle_startup_enabled:
             self._enable_tt_toggle()
 
-        if self.turbo_overlay_enabled:
+        if is_superx and self.turbo_overlay_enabled:
             self._start_turbo_monitor()
 
         if hhd_restart_needed:
             _log_info("Restarting HHD to pick up recovered hardware")
             _restart_hhd()
 
-        # Apex controller monitors are intentionally disabled for Super X v0.1.
-        if ENABLE_CONTROLLER_FIXES and button_fix_status:
+        if not is_superx and button_fix_status:
             status = button_fix_status()
             if status.get("applied"):
                 _log_info("Button fix already applied — auto-starting monitors")
@@ -404,16 +419,36 @@ class Plugin:
 
     async def get_status(self):
         """Get combined status of all features — called by the frontend on load."""
-        bf_status = {"applied": False, "error": "Disabled for Super X v0.1"}
+        is_superx = self._is_superx()
+        if is_superx:
+            bf_status = {"applied": False, "error": "Disabled on Super X"}
+        else:
+            bf_status = button_fix_status() if button_fix_status else {"applied": False, "error": "module not loaded"}
         bf_status["home_monitor_running"] = self.home_monitor.is_running if self.home_monitor else False
         bf_status["paddle_monitor_running"] = self.paddle_monitor.is_running if self.paddle_monitor else False
         return {
             "button_fix": bf_status,
-            "light_sleep": {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []},
-            "speaker_dsp": {"enabled": False, "profile": None, "speaker_node": None},
+            "light_sleep": (
+                {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []}
+                if is_superx else
+                (sleep_fix_status() if sleep_fix_status else {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []})
+            ),
+            "speaker_dsp": (
+                {"enabled": False, "profile": None, "speaker_node": None}
+                if is_superx else
+                (speaker_dsp_status() if speaker_dsp_status else {"enabled": False, "profile": None, "speaker_node": None})
+            ),
             "oxpec": oxpec_status() if oxpec_status else {"applied": False, "error": "module not loaded"},
-            "resume_fix": {"applied": False, "error": "Disabled for Super X v0.1"},
-            "sleep_enable": {"applied": False, "error": "Disabled for Super X v0.1"},
+            "resume_fix": (
+                {"applied": False, "error": "Disabled on Super X"}
+                if is_superx else
+                (resume_fix_status() if resume_fix_status else {"applied": False, "error": "module not loaded"})
+            ),
+            "sleep_enable": (
+                {"applied": False, "error": "Disabled on Super X"}
+                if is_superx else
+                (sleep_enable_status() if sleep_enable_status else {"applied": False, "error": "module not loaded"})
+            ),
             "turbo_overlay": self._get_turbo_overlay_status(),
         }
 
@@ -451,17 +486,17 @@ class Plugin:
     # Requires ostree filesystem unlock since Bazzite is immutable.
 
     async def get_button_fix_status(self):
-        if not ENABLE_CONTROLLER_FIXES:
-            return {"applied": False, "error": "Disabled for Super X v0.1"}
+        if self._is_superx():
+            return {"applied": False, "error": "Disabled on Super X"}
         if not button_fix_status:
             return {"applied": False, "error": "module not loaded"}
         return button_fix_status()
 
     async def apply_button_fix(self):
-        if not ENABLE_CONTROLLER_FIXES:
+        if self._is_superx():
             return {
                 "success": False,
-                "error": "Apex HHD/controller fixes are disabled for Super X v0.1; this build only validates oxpec.",
+                "error": "Apex HHD/controller fixes are disabled on Super X.",
             }
         if not apply_button_fix_impl:
             return {"success": False, "error": "button_fix module not loaded"}
@@ -480,10 +515,10 @@ class Plugin:
             return {"success": False, "error": str(e)}
 
     async def revert_button_fix(self):
-        if not ENABLE_CONTROLLER_FIXES:
+        if self._is_superx():
             return {
                 "success": True,
-                "message": "Apex HHD/controller fixes are disabled for Super X v0.1.",
+                "message": "Apex HHD/controller fixes are disabled on Super X.",
             }
         if not revert_button_fix_impl:
             return {"success": False, "error": "button_fix module not loaded"}
