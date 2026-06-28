@@ -58,8 +58,8 @@ const Content: FC = () => {
               color: "#ffcc00",
             }}
           >
-            <strong>Use at your own risk.</strong> This plugin modifies system files and hardware
-            settings. This v0.1 build is limited to oxpec EC support for ONEXPLAYER SUPER X.
+            <strong>v0.9-beta preview.</strong> For ONEXPLAYER SUPER X on Bazzite.
+            Do not use 120W TDP; official Windows limits are 75W on AC and 55W on battery.
           </div>
         </PanelSectionRow>
       </PanelSection>

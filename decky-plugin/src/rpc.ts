@@ -24,6 +24,7 @@ export const isBypassedSpeakerDSP = callable<[], { bypassed: boolean; error?: st
 // oxpec EC sensor driver
 export const applyOxpec = callable<[], FixResult>("apply_oxpec");
 export const revertOxpec = callable<[], FixResult>("revert_oxpec");
+export const rebuildOxpec = callable<[], FixResult>("rebuild_oxpec");
 export const setTurboOverlayEnabled = callable<[boolean], FixResult>("set_turbo_overlay_enabled");
 export const setTtToggleStartupEnabled = callable<[boolean], FixResult>("set_tt_toggle_startup_enabled");
 

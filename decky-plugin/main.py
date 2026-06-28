@@ -129,6 +129,7 @@ try:
         revert as revert_oxpec_impl,
         is_applied as oxpec_status,
         ensure_loaded as ensure_oxpec_loaded,
+        rebuild_for_current_kernel as rebuild_oxpec_impl,
     )
 except Exception as e:
     decky.logger.error(f"Failed to import oxpec_loader: {e}")
@@ -137,6 +138,7 @@ except Exception as e:
     revert_oxpec_impl = None
     oxpec_status = None
     ensure_oxpec_loaded = None
+    rebuild_oxpec_impl = None
 
 try:
     import resume_fix as _resume_fix_mod
@@ -860,6 +862,24 @@ class Plugin:
             return result
         except Exception as e:
             _log_error(f"oxpec exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def rebuild_oxpec(self):
+        if not rebuild_oxpec_impl:
+            return {"success": False, "error": "oxpec_loader module not loaded"}
+        _log_info("Rebuilding oxpec driver for current kernel...")
+        try:
+            result = await asyncio.to_thread(rebuild_oxpec_impl)
+            if result.get("success"):
+                _log_info(f"oxpec rebuilt: {result.get('message', 'OK')}")
+                if self.tt_toggle_startup_enabled:
+                    await asyncio.to_thread(self._enable_tt_toggle)
+                await asyncio.to_thread(_restart_hhd)
+            else:
+                _log_error(f"oxpec rebuild failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"oxpec rebuild exception: {e}")
             return {"success": False, "error": str(e)}
 
     async def revert_oxpec(self):

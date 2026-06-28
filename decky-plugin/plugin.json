@@ -5,7 +5,7 @@
   "api_version": 1,
   "publish": {
     "tags": ["hardware", "handheld", "onexplayer"],
-    "description": "Initial ONEXPLAYER SUPER X Bazzite helper focused on oxpec EC recognition, module loading, fan nodes, and charge controls.",
+    "description": "v0.9-beta ONEXPLAYER SUPER X Bazzite helper for oxpec EC support, fan/charge sysfs, and Turbo to HHD overlay.",
     "image": ""
   }
 }

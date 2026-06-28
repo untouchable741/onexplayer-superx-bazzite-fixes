@@ -15,6 +15,7 @@ import os
 import subprocess
 import glob
 import time
+import shutil
 
 logger = logging.getLogger("OXP-OxpecLoader")
 
@@ -61,6 +62,7 @@ def _clean_env():
 # Paths
 _PLUGIN_DIR = os.path.dirname(os.path.dirname(__file__))
 _OXPEC_DIR = os.path.join(os.path.dirname(__file__), "oxpec")
+_OXPEC_BUILD_DIR = os.path.join(_OXPEC_DIR, "build")
 _INSTALL_DIR = "/var/lib/oxpec"
 _INSTALL_KO = os.path.join(_INSTALL_DIR, "oxpec.ko")
 _SERVICE_NAME = "oxpec-load.service"
@@ -102,6 +104,58 @@ def _find_bundled_ko(kernel=None):
         return None, None
     ko = os.path.join(_OXPEC_DIR, kernel, "oxpec.ko")
     return (ko, kernel) if os.path.exists(ko) else (None, None)
+
+
+def _get_module_vermagic(ko_path):
+    if not ko_path or not os.path.exists(ko_path):
+        return None
+    try:
+        r = subprocess.run(
+            ["modinfo", "-F", "vermagic", ko_path],
+            capture_output=True, text=True, timeout=10, env=_clean_env()
+        )
+        if r.returncode != 0:
+            _log_warning(f"modinfo vermagic failed for {ko_path}: {r.stderr.strip()}")
+            return None
+        return r.stdout.strip()
+    except Exception as e:
+        _log_warning(f"modinfo vermagic exception for {ko_path}: {e}")
+        return None
+
+
+def _vermagic_kernel(vermagic):
+    if not vermagic:
+        return None
+    parts = vermagic.split()
+    return parts[0] if parts else None
+
+
+def _ko_has_superx_dmi(ko_path):
+    if not ko_path or not os.path.exists(ko_path):
+        return False
+    try:
+        with open(ko_path, "rb") as f:
+            return b"ONEXPLAYER SUPER X" in f.read()
+    except OSError:
+        return False
+
+
+def _ko_matches_kernel(ko_path, kernel=None):
+    if kernel is None:
+        kernel = _get_running_kernel()
+    vermagic = _get_module_vermagic(ko_path)
+    return (
+        bool(kernel and vermagic and _vermagic_kernel(vermagic) == kernel and _ko_has_superx_dmi(ko_path)),
+        vermagic,
+    )
+
+
+def _find_any_bundled_ko():
+    for kernel in reversed(_list_bundled_kernels()):
+        ko = os.path.join(_OXPEC_DIR, kernel, "oxpec.ko")
+        if os.path.exists(ko):
+            return ko, kernel
+    return None, None
 
 
 def _list_bundled_kernels():
@@ -288,11 +342,126 @@ def _try_insmod(ko_path):
         return {"success": False, "error": str(e)}
 
 
+def _preflight_rebuild(kernel):
+    build_dir = f"/lib/modules/{kernel}/build" if kernel else None
+    errors = []
+    if not kernel:
+        errors.append("Cannot determine running kernel")
+    if not _safe_is_dir(build_dir):
+        errors.append(f"Kernel build directory missing: {build_dir}")
+    if not _safe_is_dir(_OXPEC_BUILD_DIR):
+        errors.append(f"oxpec build source directory missing: {_OXPEC_BUILD_DIR}")
+    if not shutil.which("make"):
+        errors.append("make not found")
+    if not (shutil.which("gcc") or shutil.which("cc")):
+        errors.append("gcc/cc not found")
+    return errors, build_dir
+
+
+def rebuild_for_current_kernel():
+    """Rebuild bundled oxpec.ko for the running kernel, then load it."""
+    kernel = _get_running_kernel()
+    errors, kernel_build_dir = _preflight_rebuild(kernel)
+    if errors:
+        message = "Cannot rebuild oxpec.ko: " + "; ".join(errors)
+        _log_error(message)
+        return {"success": False, "error": message, "steps": errors}
+
+    steps = [f"Running kernel: {kernel}", f"Kernel build directory: {kernel_build_dir}"]
+    clean_cmd = ["make", "-C", kernel_build_dir, f"M={_OXPEC_BUILD_DIR}", "clean"]
+    build_cmd = ["make", "-C", kernel_build_dir, f"M={_OXPEC_BUILD_DIR}", "modules"]
+    _log_info(f"Rebuilding oxpec.ko: {' '.join(build_cmd)}")
+
+    try:
+        clean = subprocess.run(clean_cmd, capture_output=True, text=True, timeout=60, env=_clean_env())
+        if clean.stdout.strip():
+            _log_info(f"oxpec rebuild clean stdout:\n{clean.stdout.strip()[-2000:]}")
+        if clean.stderr.strip():
+            _log_warning(f"oxpec rebuild clean stderr:\n{clean.stderr.strip()[-2000:]}")
+        r = subprocess.run(build_cmd, capture_output=True, text=True, timeout=180, env=_clean_env())
+    except Exception as e:
+        message = f"Rebuild failed to start: {e}"
+        _log_error(message)
+        return {"success": False, "error": message, "steps": steps}
+
+    stdout = r.stdout.strip()
+    stderr = r.stderr.strip()
+    if stdout:
+        _log_info(f"oxpec rebuild stdout:\n{stdout[-4000:]}")
+    if stderr:
+        _log_warning(f"oxpec rebuild stderr:\n{stderr[-4000:]}")
+
+    steps.append("make completed" if r.returncode == 0 else f"make failed: {r.returncode}")
+    if r.returncode != 0:
+        return {
+            "success": False,
+            "error": f"oxpec rebuild failed with exit code {r.returncode}",
+            "steps": steps,
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
+        }
+
+    built_ko = os.path.join(_OXPEC_BUILD_DIR, "oxpec.ko")
+    matches, vermagic = _ko_matches_kernel(built_ko, kernel)
+    _log_info(f"rebuilt oxpec.ko vermagic: {vermagic or 'unknown'}")
+    if not matches:
+        return {
+            "success": False,
+            "error": (
+                "Rebuilt oxpec.ko vermagic does not match running kernel. "
+                f"kernel={kernel}, vermagic={vermagic or 'unknown'}"
+            ),
+            "steps": steps,
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
+        }
+
+    target_dir = os.path.join(_OXPEC_DIR, kernel)
+    target_ko = os.path.join(target_dir, "oxpec.ko")
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        shutil.copy2(built_ko, target_ko)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to install rebuilt oxpec.ko: {e}", "steps": steps}
+
+    steps.append(f"Installed rebuilt module: {target_ko}")
+    _log_info(f"Installed rebuilt oxpec.ko: {target_ko}")
+
+    if _is_module_loaded():
+        revert()
+    load_result = apply()
+    steps.extend(load_result.get("steps", []))
+    if load_result.get("success"):
+        return {
+            "success": True,
+            "message": "Rebuilt and loaded oxpec.ko",
+            "steps": steps,
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
+        }
+    return {
+        "success": False,
+        "error": load_result.get("error", "Rebuilt module but failed to load oxpec"),
+        "steps": steps,
+        "stdout": stdout[-4000:],
+        "stderr": stderr[-4000:],
+    }
+
+
 def is_applied():
     """Check current status of oxpec driver installation."""
     kernel = _get_running_kernel()
     bundled_kernels = _list_bundled_kernels()
     bundled_ko, _ = _find_bundled_ko(kernel)
+    mismatch_ko = None
+    mismatch_kernel = None
+    if not bundled_ko:
+        mismatch_ko, mismatch_kernel = _find_any_bundled_ko()
+    bundled_matches = False
+    bundled_vermagic = None
+    if bundled_ko:
+        bundled_matches, bundled_vermagic = _ko_matches_kernel(bundled_ko, kernel)
+    mismatch_vermagic = _get_module_vermagic(mismatch_ko) if mismatch_ko else None
 
     module_loaded = _is_module_loaded()
     hwmon_path = _find_hwmon()
@@ -311,8 +480,8 @@ def is_applied():
         except Exception:
             load_method = "insmod"
 
-    # kernel_compatible: True if loaded, or matching bundled .ko exists, or modprobe works
-    kernel_compatible = module_loaded or bundled_ko is not None
+    # kernel_compatible: True if loaded, exact bundled .ko exists and matches, or modprobe works.
+    kernel_compatible = module_loaded or bundled_matches
     if not kernel_compatible:
         try:
             r = subprocess.run(
@@ -344,8 +513,17 @@ def is_applied():
         "service_enabled": service_enabled,
         "hwmon_path": hwmon_path,
         "kernel_compatible": kernel_compatible,
+        "kernel_mismatch": bool(not kernel_compatible),
+        "kernel_mismatch_message": (
+            None if kernel_compatible else "Kernel mismatch. Rebuild oxpec.ko for current kernel."
+        ),
         "running_kernel": kernel,
         "bundled_kernels": bundled_kernels,
+        "bundled_ko_path": bundled_ko,
+        "bundled_vermagic": bundled_vermagic,
+        "mismatch_ko_path": mismatch_ko,
+        "mismatch_bundled_kernel": mismatch_kernel,
+        "mismatch_vermagic": mismatch_vermagic,
         "load_method": load_method,
         **sysfs_nodes,
     }
@@ -394,6 +572,14 @@ def ensure_loaded():
     # 2. Try bundled .ko for running kernel
     bundled_ko, matched_kernel = _find_bundled_ko(kernel)
     if bundled_ko:
+        matches, vermagic = _ko_matches_kernel(bundled_ko, kernel)
+        if not matches:
+            msg = (
+                "Kernel mismatch. Rebuild oxpec.ko for current kernel. "
+                f"kernel={kernel}, vermagic={vermagic or 'unknown'}"
+            )
+            _log_warning(msg)
+            return {"success": False, "error": msg, "kernel_mismatch": True}
         _log_info(f"Trying bundled oxpec.ko for {matched_kernel}")
         result = _try_insmod(bundled_ko)
         if result["success"] and _is_module_loaded():
@@ -475,6 +661,14 @@ def apply():
             }
 
         steps.append(f"Using bundled .ko for {matched_kernel}")
+        matches, vermagic = _ko_matches_kernel(bundled_ko, kernel)
+        if not matches:
+            msg = (
+                "Kernel mismatch. Rebuild oxpec.ko for current kernel. "
+                f"kernel={kernel}, vermagic={vermagic or 'unknown'}"
+            )
+            _log_warning(msg)
+            return {"success": False, "error": msg, "steps": steps, "kernel_mismatch": True}
 
         # Copy .ko to install location with SELinux context
         ok, err = _install_bundled_ko(bundled_ko)

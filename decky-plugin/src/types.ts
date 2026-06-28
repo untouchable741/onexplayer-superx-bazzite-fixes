@@ -14,8 +14,15 @@ export interface OxpecStatus {
   charge_control_nodes?: string[];
   turbo_toggle_nodes?: string[];
   kernel_compatible?: boolean | null;
+  kernel_mismatch?: boolean;
+  kernel_mismatch_message?: string | null;
   running_kernel?: string;
   bundled_kernels?: string[];
+  bundled_ko_path?: string | null;
+  bundled_vermagic?: string | null;
+  mismatch_ko_path?: string | null;
+  mismatch_bundled_kernel?: string | null;
+  mismatch_vermagic?: string | null;
   load_method?: "modprobe" | "insmod" | null;
   error?: string;
 }

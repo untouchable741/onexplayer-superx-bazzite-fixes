@@ -1,11 +1,12 @@
 import { FC } from "react";
 import {
+  ButtonItem,
   PanelSection,
   PanelSectionRow,
   ToggleField,
 } from "@decky/ui";
 import type { LoadingState, ResultMessage, OxpecStatus, TurboOverlayStatus } from "./types";
-import { applyOxpec, revertOxpec, setTtToggleStartupEnabled, setTurboOverlayEnabled } from "./rpc";
+import { applyOxpec, rebuildOxpec, revertOxpec, setTtToggleStartupEnabled, setTurboOverlayEnabled } from "./rpc";
 import { InlineStatus } from "./InlineStatus";
 
 const NodeList: FC<{ title: string; nodes?: string[] }> = ({ title, nodes }) => (
@@ -90,6 +91,26 @@ export const FixesSection: FC<{
     }
   };
 
+  const handleRebuildOxpec = async () => {
+    setLoading({
+      active: "rebuildOxpec",
+      message: "Rebuilding oxpec.ko...",
+    });
+    try {
+      const res = await rebuildOxpec();
+      if (res.success) {
+        showResult("rebuildOxpec", res.message || "Rebuilt oxpec.ko", "success");
+      } else {
+        showResult("rebuildOxpec", res.error || "Rebuild failed", "error");
+      }
+    } catch (e) {
+      showResult("rebuildOxpec", `Error: ${e}`, "error");
+    } finally {
+      setLoading({ active: null, message: "" });
+      refresh();
+    }
+  };
+
   return (
     <PanelSection title="EC Driver">
       {!statusLoaded ? (
@@ -116,7 +137,7 @@ export const FixesSection: FC<{
             />
           </PanelSectionRow>
           <InlineStatus loading={loading} result={result} section="oxpec" />
-          {oxpec.kernel_compatible === false && (
+          {oxpec.kernel_mismatch && (
             <PanelSectionRow>
               <div
                 style={{
@@ -129,14 +150,27 @@ export const FixesSection: FC<{
                   color: "#ffcc00",
                 }}
               >
-                No module for kernel <strong>{oxpec.running_kernel}</strong>.
+                {oxpec.kernel_mismatch_message || "Kernel mismatch. Rebuild oxpec.ko for current kernel."}{" "}
+                Current kernel: <strong>{oxpec.running_kernel || "unknown"}</strong>.
                 {oxpec.bundled_kernels && oxpec.bundled_kernels.length > 0
                   ? <> Available: {oxpec.bundled_kernels.join(", ")}.</>
                   : <> No bundled modules available.</>
-                } Build and bundle a matching oxpec.ko for this kernel.
+                } {oxpec.mismatch_vermagic ? <>Bundled vermagic: {oxpec.mismatch_vermagic}.</> : null}
               </div>
             </PanelSectionRow>
           )}
+          {oxpec.kernel_mismatch && (
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                onClick={handleRebuildOxpec}
+                disabled={loading.active === "rebuildOxpec" || loading.active === "oxpec"}
+              >
+                Rebuild oxpec
+              </ButtonItem>
+            </PanelSectionRow>
+          )}
+          <InlineStatus loading={loading} result={result} section="rebuildOxpec" />
           <PanelSectionRow>
             <div
               style={{
@@ -150,6 +184,7 @@ export const FixesSection: FC<{
               }}
             >
               <div><strong>Kernel:</strong> {oxpec.running_kernel || "unknown"}</div>
+              <div><strong>Bundled vermagic:</strong> {oxpec.bundled_vermagic || oxpec.mismatch_vermagic || "not detected"}</div>
               <div><strong>hwmon:</strong> {oxpec.hwmon_path || "not detected yet"}</div>
               <NodeList title="Fan nodes" nodes={oxpec.fan_control_nodes} />
               <NodeList title="Charge nodes" nodes={oxpec.charge_control_nodes} />
@@ -198,9 +233,11 @@ export const FixesSection: FC<{
                 color: "#ddd",
               }}
             >
-              Super X v0.1 only validates oxpec EC support. Apex HHD/controller,
-              back-paddle, sleep, and DSP fixes are not enabled. Turbo overlay is
-              handled only by this Decky evdev watcher.
+              Super X v0.9-beta keeps stock HHD and does not apply Apex
+              controller patches. Official Windows TDP limits are 75W on AC
+              power and 55W on battery; do not use 120W even if HHD exposes it.
+              Ctrl+Meta+Alt from an external keyboard also opens the overlay in
+              this preview.
             </div>
           </PanelSectionRow>
         </>

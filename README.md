@@ -1,47 +1,47 @@
-# ONEXPLAYER SUPER X — Bazzite oxpec Test Plugin
+# ONEXPLAYER SUPER X Tools v0.9-beta
 
-A Decky Loader plugin variant for early ONEXPLAYER SUPER X testing on Bazzite.
+Decky Loader preview plugin for ONEXPLAYER SUPER X on Bazzite.
 
-This v0.1 build is intentionally narrow: it validates `oxpec` EC driver recognition,
-module loading, fan hwmon nodes, and charge-related sysfs controls.
+Supported device: ONEXPLAYER SUPER X only.
 
-## Scope
+Tested:
 
-Included:
+- OS: Bazzite Stable 43
+- Kernel: `6.17.7-ba29.fc43.x86_64`
+- HHD: stock/unpatched
 
-- Adds the `ONEXPLAYER SUPER X` DMI entry to the bundled `oxpec.c` source.
-- Installs/loads a bundled `oxpec.ko` that matches the running kernel.
-- Falls back through `modprobe`, bundled `insmod`, and `/var/lib/oxpec/oxpec.ko`.
-- Shows whether fan, charge, and turbo-takeover sysfs nodes are detected.
-- Enables `tt_toggle=1` when available and watches the Turbo keyboard chord
-  `LeftCtrl + LeftMeta/LeftGUI + LeftAlt` to toggle the existing HHD overlay.
+## Features
 
-Not included in v0.1:
+- Loads patched `oxpec.ko` with ONEXPLAYER SUPER X DMI support.
+- Shows fan, charge, bypass, and `tt_toggle` sysfs paths.
+- Sets `/sys/devices/platform/oxp-platform/tt_toggle` to `1`.
+- Watches evdev for Turbo's `Ctrl + Meta + Alt` chord and opens the HHD overlay.
+- Detects kernel/module mismatch and can rebuild `oxpec.ko` on-device when kernel
+  headers and build tools are already installed.
 
-- Apex HHD/controller mapping patches.
-- Back-paddle firmware remapping.
-- Sleep, resume, and speaker DSP fixes.
+## Not Included
 
-Those Apex-specific modules remain in the repository for reference, but the Super X
-plugin UI, startup path, and package output do not apply HHD patches.
+- No HHD package patching.
+- No Apex controller/button mapping patches on Super X.
+- No HHD TDP changes.
 
-## Super X oxpec DMI Patch
+## TDP Safety
 
-The bundled driver source adds:
+ONEXPLAYER Super X official Windows limits are:
 
-```c
-{
-	.matches = {
-		DMI_MATCH(DMI_BOARD_VENDOR, "ONE-NETBOOK"),
-		DMI_EXACT_MATCH(DMI_BOARD_NAME, "ONEXPLAYER SUPER X"),
-	},
-	.driver_data = (void *)oxp_fly,
-},
-```
+- AC power: 75W max
+- Battery: 55W max
+
+Do not use 120W even if HHD exposes it. A future release should add a
+Super X-specific HHD TDP profile.
+
+## Known Behavior
+
+External keyboard `Ctrl + Meta + Alt` also opens the HHD overlay in v0.9-beta.
+This is intentional for this preview; the watcher does not restrict by keyboard
+device yet.
 
 ## Build
-
-From the plugin directory:
 
 ```bash
 cd decky-plugin
@@ -50,20 +50,7 @@ bun run build
 bun run package
 ```
 
-`bun run package` now refuses to package stale `oxpec.ko` files that do not
-contain `ONEXPLAYER SUPER X`.
-
-## Rebuild oxpec.ko On Bazzite
-
-Run this on the target Super X/Bazzite device, not on macOS:
-
-```bash
-./scripts/build-oxpec-on-bazzite.sh
-cd decky-plugin
-bun run package
-```
-
-The package command creates:
+Package output:
 
 ```text
 decky-plugin/OneXPlayer_Super_X_Tools.zip
@@ -71,34 +58,55 @@ decky-plugin/OneXPlayer_Super_X_Tools.zip
 
 ## Install
 
-Install through Decky Developer Mode, or manually:
+Install the zip through Decky Loader Developer Mode, or manually:
 
 ```bash
 sudo unzip -o decky-plugin/OneXPlayer_Super_X_Tools.zip -d ~/homebrew/plugins/
 sudo systemctl restart plugin_loader.service
 ```
 
-## Test On Bazzite
+## Kernel Mismatch / Rebuild
 
-After installing and toggling on the EC Sensor Driver in Decky, run:
+The bundled module must match `uname -r`. If the plugin shows:
+
+```text
+Kernel mismatch. Rebuild oxpec.ko for current kernel.
+```
+
+use the **Rebuild oxpec** button.
+
+The rebuild requires these to already exist on the device:
+
+- `/lib/modules/$(uname -r)/build`
+- `make`
+- `gcc` or `cc`
+
+The plugin does not install packages automatically.
+
+## Verification Commands
 
 ```bash
 uname -r
-modinfo oxpec | grep -i "super\|onex\|one-netbook"
+modinfo oxpec | grep -i super
 lsmod | grep oxpec
-sudo dmesg | grep -Ei "oxpec|onex|one.?netbook|super"
+cat /sys/devices/platform/oxp-platform/tt_toggle
 find /sys -iname "*tt_toggle*" -o -iname "*charge*limit*" -o -iname "*bypass*" -o -iname "*fan*" 2>/dev/null
 ```
 
-Then enable **Turbo -> HHD Overlay** in the plugin, press the physical Turbo
-button, and confirm the HHD overlay toggles once per press.
-
-Useful Decky log:
+Useful log:
 
 ```bash
-sudo tail -n 100 ~/homebrew/logs/ONEXPLAYER\ SUPER\ X\ Tools/oxp-superx.log
+sudo tail -n 150 ~/homebrew/logs/ONEXPLAYER\ SUPER\ X\ Tools/oxp-superx.log
 ```
 
-If the running Bazzite kernel does not match one of the bundled module folders under
-`decky-plugin/py_modules/oxpec/`, rebuild `oxpec.ko` on the target kernel and add it
-under `decky-plugin/py_modules/oxpec/$(uname -r)/oxpec.ko`.
+## v0.9-beta Checklist
+
+- Reboot and confirm oxpec loads.
+- Suspend/resume and confirm sysfs nodes still appear.
+- Turbo opens the HHD overlay.
+- External keyboard `Ctrl + Meta + Alt` opens the HHD overlay intentionally.
+- Fan control changes RPM in HHD.
+- Charge limit changes the sysfs value.
+- Bypass works while plugged in.
+- Kernel mismatch warning appears when no matching module exists.
+- Rebuild oxpec works when kernel headers/build tools are available.
