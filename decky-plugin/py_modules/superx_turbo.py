@@ -6,15 +6,17 @@ physical Turbo button emits the keyboard modifier chord:
 
   LeftCtrl + LeftMeta/LeftGUI + LeftAlt
 
-The watcher uses the same hidraw architecture as the Apex Home button monitor
-and calls the same HHD overlay toggle function from home_button.py.
+The watcher uses evdev (/dev/input/event*) because Super X emits standard
+keyboard events after tt_toggle=1. It calls the same HHD overlay toggle
+function from home_button.py.
 """
 
 import asyncio
-import glob
+import fcntl
 import logging
 import os
 import select
+import struct
 import time
 
 from home_button import _toggle_hhd_overlay
@@ -57,21 +59,49 @@ def _log_warning(msg):
 SUPERX_VENDOR = "ONE-NETBOOK"
 SUPERX_BOARD = "ONEXPLAYER SUPER X"
 
-# USB VID:PID used by the Apex keyboard macro path. Super X is expected to use
-# the same style of hidraw keyboard report, but we fall back to any hidraw node
-# so early testers can still validate the chord if the VID/PID differs.
-PREFERRED_VID = 0x1A86
-PREFERRED_PID = 0xFE00
-
-MOD_LEFTCTRL = 0x01
-MOD_LEFTALT = 0x04
-MOD_LEFTMETA = 0x08
-TURBO_CHORD = MOD_LEFTCTRL | MOD_LEFTALT | MOD_LEFTMETA
-DEBOUNCE_SECS = 2.0
+EV_KEY = 0x01
+KEY_LEFTCTRL = 29
+KEY_LEFTALT = 56
+KEY_LEFTMETA = 125
+TURBO_KEYS = {KEY_LEFTCTRL, KEY_LEFTMETA, KEY_LEFTALT}
+KEY_NAMES = {
+    KEY_LEFTCTRL: "KEY_LEFTCTRL",
+    KEY_LEFTMETA: "KEY_LEFTMETA",
+    KEY_LEFTALT: "KEY_LEFTALT",
+}
+CHORD_WINDOW_SECS = 0.150
+DEBOUNCE_SECS = 0.800
+INPUT_EVENT = struct.Struct("llHHi")
 TT_TOGGLE_EXACT_PATH = "/sys/devices/platform/oxp-platform/tt_toggle"
 TT_TOGGLE_SEARCH_ROOT = "/sys/devices/platform/oxp-platform"
 TT_TOGGLE_RETRY_SECS = 5.0
 TT_TOGGLE_RETRY_INTERVAL_SECS = 0.25
+
+_IOC_NRBITS = 8
+_IOC_TYPEBITS = 8
+_IOC_SIZEBITS = 14
+_IOC_NRSHIFT = 0
+_IOC_TYPESHIFT = _IOC_NRSHIFT + _IOC_NRBITS
+_IOC_SIZESHIFT = _IOC_TYPESHIFT + _IOC_TYPEBITS
+_IOC_DIRSHIFT = _IOC_SIZESHIFT + _IOC_SIZEBITS
+_IOC_READ = 2
+
+
+def _ioc(direction, type_, nr, size):
+    return (
+        (direction << _IOC_DIRSHIFT)
+        | (type_ << _IOC_TYPESHIFT)
+        | (nr << _IOC_NRSHIFT)
+        | (size << _IOC_SIZESHIFT)
+    )
+
+
+def _eviocgbit(ev_type, length):
+    return _ioc(_IOC_READ, ord("E"), 0x20 + ev_type, length)
+
+
+def _eviocgname(length):
+    return _ioc(_IOC_READ, ord("E"), 0x06, length)
 
 
 def _read_sysfs_text(path):
@@ -175,57 +205,80 @@ def enable_tt_toggle(retry=True):
     }
 
 
-def _hidraw_info(sysfs_path):
-    uevent_path = os.path.join(sysfs_path, "device", "uevent")
-    info = {"path": sysfs_path, "vid": None, "pid": None, "raw": ""}
-    try:
-        with open(uevent_path) as f:
-            content = f.read()
-        info["raw"] = content
-    except OSError:
-        return info
-
-    for line in content.splitlines():
-        if not line.startswith("HID_ID="):
-            continue
-        parts = line.split(":")
-        if len(parts) >= 3:
-            try:
-                info["vid"] = int(parts[1], 16)
-                info["pid"] = int(parts[2], 16)
-            except ValueError:
-                pass
-        break
-    return info
-
-
-def find_hidraw_devices():
-    preferred = []
-    fallback = []
-    for sysfs_path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
-        name = os.path.basename(sysfs_path)
-        dev_path = f"/dev/{name}"
-        if not os.path.exists(dev_path):
-            continue
-        info = _hidraw_info(sysfs_path)
-        item = {"dev_path": dev_path, "vid": info["vid"], "pid": info["pid"]}
-        if info["vid"] == PREFERRED_VID and info["pid"] == PREFERRED_PID:
-            preferred.append(item)
-        else:
-            fallback.append(item)
-    return preferred + fallback
-
-
-def _is_turbo_chord(data):
-    if not data or len(data) < 8:
+def _bit_is_set(buf, bit):
+    idx = bit // 8
+    if idx >= len(buf):
         return False
-    modifier = data[0]
-    keys = data[2:8]
-    return (modifier & TURBO_CHORD) == TURBO_CHORD and all(k == 0 for k in keys)
+    return bool(buf[idx] & (1 << (bit % 8)))
+
+
+def _event_name(event_path, fd=None):
+    name = ""
+    close_fd = False
+    try:
+        if fd is None:
+            fd = os.open(event_path, os.O_RDONLY | os.O_NONBLOCK)
+            close_fd = True
+        buf = bytearray(256)
+        fcntl.ioctl(fd, _eviocgname(len(buf)), buf, True)
+        name = bytes(buf).split(b"\0", 1)[0].decode(errors="replace")
+    except OSError:
+        sysfs_name = f"/sys/class/input/{os.path.basename(event_path)}/device/name"
+        name = _read_sysfs_text(sysfs_name) or ""
+    finally:
+        if close_fd and fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return name or "unknown"
+
+
+def _supported_keys(fd):
+    buf = bytearray(256)
+    fcntl.ioctl(fd, _eviocgbit(EV_KEY, len(buf)), buf, True)
+    return {key for key in TURBO_KEYS if _bit_is_set(buf, key)}
+
+
+def find_evdev_devices():
+    devices = []
+    input_dir = "/dev/input"
+    if not os.path.isdir(input_dir):
+        _log_warning(f"evdev input directory not found: {input_dir}")
+        return devices
+
+    for name in sorted(os.listdir(input_dir)):
+        if not name.startswith("event"):
+            continue
+        dev_path = os.path.join(input_dir, name)
+        try:
+            fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as e:
+            _log_warning(f"evdev candidate inaccessible: {dev_path} error={e}")
+            continue
+
+        try:
+            dev_name = _event_name(dev_path, fd)
+            supported = _supported_keys(fd)
+            supported_names = [KEY_NAMES[key] for key in sorted(supported)]
+            _log_info(
+                "evdev candidate: "
+                f"path={dev_path} name={dev_name!r} supports={supported_names}"
+            )
+            if TURBO_KEYS.issubset(supported):
+                devices.append({"dev_path": dev_path, "name": dev_name})
+        except OSError as e:
+            _log_warning(f"evdev candidate failed capability scan: {dev_path} error={e}")
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return devices
 
 
 class SuperXTurboMonitor:
-    """Async hidraw monitor for the Super X Turbo chord."""
+    """Async evdev monitor for the Super X Turbo chord."""
 
     def __init__(self):
         self._task = None
@@ -254,21 +307,27 @@ class SuperXTurboMonitor:
             return
 
         while self._running:
-            devices = find_hidraw_devices()
+            devices = find_evdev_devices()
             if not devices:
-                _log_warning("No hidraw devices found for Super X Turbo watcher, retrying in 5s")
+                _log_warning("No evdev keyboard-capable devices found for Super X Turbo watcher, retrying in 5s")
                 await asyncio.sleep(5)
                 continue
 
             fds = {}
+            state = {}
             try:
                 for dev in devices:
                     try:
                         fd = os.open(dev["dev_path"], os.O_RDONLY | os.O_NONBLOCK)
                         fds[fd] = dev
+                        state[fd] = {
+                            "pressed": set(),
+                            "down_times": {},
+                            "chord_active": False,
+                        }
                         _log_info(
-                            "Selected hidraw device for Turbo watcher: "
-                            f"{dev['dev_path']} vid={dev['vid']} pid={dev['pid']}"
+                            "Selected evdev device for Turbo watcher: "
+                            f"path={dev['dev_path']} name={dev['name']!r}"
                         )
                     except OSError as e:
                         _log_warning(f"Could not open {dev['dev_path']}: {e}")
@@ -285,25 +344,57 @@ class SuperXTurboMonitor:
 
                     for fd in ready:
                         try:
-                            data = os.read(fd, 8)
+                            data = os.read(fd, INPUT_EVENT.size * 16)
                         except BlockingIOError:
                             continue
                         except OSError:
                             raise
 
-                        if not _is_turbo_chord(data):
-                            continue
+                        for offset in range(0, len(data) - (len(data) % INPUT_EVENT.size), INPUT_EVENT.size):
+                            _, _, ev_type, code, value = INPUT_EVENT.unpack_from(data, offset)
+                            if ev_type != EV_KEY or code not in TURBO_KEYS:
+                                continue
 
-                        now = time.monotonic()
-                        if now - last_trigger < DEBOUNCE_SECS:
-                            continue
-                        last_trigger = now
-                        dev_path = fds[fd]["dev_path"]
-                        _log_info(f"Super X Turbo chord detected on {dev_path}; toggling HHD overlay")
-                        _toggle_hhd_overlay()
-                        _log_info("Overlay command executed via existing HHD state API")
+                            dev = fds[fd]
+                            key_name = KEY_NAMES[code]
+                            dev_state = state[fd]
+                            now = time.monotonic()
+
+                            if value in (1, 2):
+                                if code not in dev_state["pressed"]:
+                                    _log_info(f"Turbo key down: {key_name} on {dev['dev_path']}")
+                                    dev_state["down_times"][code] = now
+                                dev_state["pressed"].add(code)
+                            elif value == 0:
+                                if code in dev_state["pressed"]:
+                                    _log_info(f"Turbo key up: {key_name} on {dev['dev_path']}")
+                                dev_state["pressed"].discard(code)
+                                dev_state["down_times"].pop(code, None)
+                                dev_state["chord_active"] = False
+                                continue
+                            else:
+                                continue
+
+                            if not TURBO_KEYS.issubset(dev_state["pressed"]):
+                                continue
+                            times = [dev_state["down_times"].get(key, now) for key in TURBO_KEYS]
+                            if max(times) - min(times) > CHORD_WINDOW_SECS:
+                                continue
+                            if dev_state["chord_active"]:
+                                continue
+                            if now - last_trigger < DEBOUNCE_SECS:
+                                continue
+
+                            dev_state["chord_active"] = True
+                            last_trigger = now
+                            _log_info(
+                                "Super X Turbo chord detected on "
+                                f"{dev['dev_path']} ({dev['name']}); launching HHD overlay"
+                            )
+                            _toggle_hhd_overlay()
+                            _log_info("Overlay launch called via existing HHD state API")
             except OSError as e:
-                _log_warning(f"hidraw device changed/disconnected: {e}; retrying in 5s")
+                _log_warning(f"evdev device changed/disconnected: {e}; retrying in 5s")
                 await asyncio.sleep(5)
             finally:
                 for fd in list(fds.keys()):

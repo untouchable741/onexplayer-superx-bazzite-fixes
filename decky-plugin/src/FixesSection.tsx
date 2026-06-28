@@ -162,7 +162,7 @@ export const FixesSection: FC<{
               description={
                 turboOverlay.is_superx
                   ? turboOverlay.running
-                    ? "Watching hidraw for Ctrl+Meta+Alt"
+                    ? "Watching evdev for Ctrl+Meta+Alt"
                     : "Detect Ctrl+Meta+Alt and toggle HHD overlay"
                   : `DMI mismatch: ${turboOverlay.board_vendor || "unknown"} / ${turboOverlay.board_name || "unknown"}`
               }
@@ -200,7 +200,7 @@ export const FixesSection: FC<{
             >
               Super X v0.1 only validates oxpec EC support. Apex HHD/controller,
               back-paddle, sleep, and DSP fixes are not enabled. Turbo overlay is
-              handled only by this Decky hidraw watcher.
+              handled only by this Decky evdev watcher.
             </div>
           </PanelSectionRow>
         </>
