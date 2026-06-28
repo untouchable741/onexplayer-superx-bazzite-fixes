@@ -13,6 +13,8 @@ Loading strategy:
 import logging
 import os
 import subprocess
+import glob
+import time
 
 logger = logging.getLogger("OXP-OxpecLoader")
 
@@ -65,6 +67,9 @@ _SERVICE_NAME = "oxpec-load.service"
 _SERVICE_PATH = f"/etc/systemd/system/{_SERVICE_NAME}"
 _OXP_PLATFORM_DIR = "/sys/devices/platform/oxp-platform"
 _TT_TOGGLE_EXACT_PATH = os.path.join(_OXP_PLATFORM_DIR, "tt_toggle")
+_PLATFORM_FAN_GLOB = os.path.join(_OXP_PLATFORM_DIR, "hwmon", "hwmon*", "fan1_input")
+_SYSFS_RETRY_SECS = 5.0
+_SYSFS_RETRY_INTERVAL_SECS = 0.25
 
 
 def _make_service_content(ko_path):
@@ -109,22 +114,36 @@ def _list_bundled_kernels():
     )
 
 
+def _safe_exists(path):
+    return bool(path) and os.path.exists(path)
+
+
+def _safe_is_file(path):
+    return bool(path) and os.path.isfile(path)
+
+
+def _safe_is_dir(path):
+    return bool(path) and os.path.isdir(path)
+
+
+def _glob_paths(pattern):
+    if not pattern:
+        return []
+    return glob.glob(pattern)
+
+
+def _find_platform_fan_nodes():
+    return sorted(p for p in _glob_paths(_PLATFORM_FAN_GLOB) if _safe_is_file(p))
+
+
 def _find_hwmon():
     """Find the oxpec hwmon device path, if loaded."""
-    for fan_path in sorted(
-        glob_path for glob_path in _glob_paths(os.path.join(_OXP_PLATFORM_DIR, "hwmon", "hwmon*", "fan1_input"))
-    ):
-        hwmon_path = os.path.dirname(fan_path)
-        name_path = os.path.join(hwmon_path, "name")
-        try:
-            with open(name_path) as f:
-                if f.read().strip() == "oxpec":
-                    return hwmon_path
-        except (OSError, IOError):
-            return hwmon_path
+    fan_nodes = _find_platform_fan_nodes()
+    if fan_nodes:
+        return os.path.dirname(fan_nodes[0])
 
     hwmon_base = "/sys/class/hwmon"
-    if not os.path.isdir(hwmon_base):
+    if not _safe_is_dir(hwmon_base):
         return None
     for entry in os.listdir(hwmon_base):
         name_path = os.path.join(hwmon_base, entry, "name")
@@ -137,22 +156,17 @@ def _find_hwmon():
     return None
 
 
-def _glob_paths(pattern):
-    import glob
-    return glob.glob(pattern)
-
-
 def _existing_paths(paths):
     """Return paths that currently exist."""
-    return [p for p in paths if os.path.exists(p)]
+    return [p for p in paths if _safe_exists(p)]
 
 
 def _find_tt_toggle_paths():
     paths = []
-    if os.path.isfile(_TT_TOGGLE_EXACT_PATH):
+    if _safe_is_file(_TT_TOGGLE_EXACT_PATH):
         paths.append(_TT_TOGGLE_EXACT_PATH)
 
-    if os.path.isdir(_OXP_PLATFORM_DIR):
+    if _safe_is_dir(_OXP_PLATFORM_DIR):
         for root, _, files in os.walk(_OXP_PLATFORM_DIR):
             if "tt_toggle" not in files:
                 continue
@@ -162,30 +176,55 @@ def _find_tt_toggle_paths():
     return paths
 
 
+def _wait_for_sysfs_nodes(timeout_secs=_SYSFS_RETRY_SECS):
+    deadline = time.monotonic() + timeout_secs
+    while True:
+        nodes = _find_sysfs_nodes()
+        if nodes["turbo_toggle_nodes"] or nodes["fan_control_nodes"]:
+            return nodes
+        if time.monotonic() >= deadline:
+            return nodes
+        time.sleep(_SYSFS_RETRY_INTERVAL_SECS)
+
+
+def _log_sysfs_nodes(nodes=None):
+    if nodes is None:
+        nodes = _find_sysfs_nodes()
+
+    if _safe_is_dir(_OXP_PLATFORM_DIR):
+        _log_info(f"oxp-platform found: {_OXP_PLATFORM_DIR}")
+    else:
+        _log_warning(f"oxp-platform missing: {_OXP_PLATFORM_DIR}")
+
+    if nodes.get("turbo_toggle_nodes"):
+        _log_info(f"tt_toggle found: {', '.join(nodes['turbo_toggle_nodes'])}")
+    else:
+        _log_warning("tt_toggle not detected")
+
+    fan_nodes = [p for p in nodes.get("fan_control_nodes", []) if p.endswith("fan1_input")]
+    if fan_nodes:
+        _log_info(f"fan1_input found: {', '.join(fan_nodes)}")
+    else:
+        _log_warning(f"fan1_input not detected under {_PLATFORM_FAN_GLOB}")
+
+
 def _find_sysfs_nodes():
     """Find fan, charge, and turbo-takeover nodes exposed by oxpec."""
     hwmon_path = _find_hwmon()
-    fan_nodes = []
+    fan_nodes = _find_platform_fan_nodes()
     turbo_nodes = _find_tt_toggle_paths()
     if hwmon_path:
-        fan_nodes = _existing_paths([
+        for path in _existing_paths([
             os.path.join(hwmon_path, "fan1_input"),
             os.path.join(hwmon_path, "pwm1"),
             os.path.join(hwmon_path, "pwm1_enable"),
-        ])
-
-    fan_nodes.extend(
-        p for p in _glob_paths(os.path.join(_OXP_PLATFORM_DIR, "hwmon", "hwmon*", "fan1_input"))
-        if p not in fan_nodes
-    )
-
-    turbo_nodes.extend(
-        p for p in _existing_paths([os.path.join(hwmon_path, "tt_led")]) if hwmon_path and p not in turbo_nodes
-    )
+        ]):
+            if path not in fan_nodes:
+                fan_nodes.append(path)
 
     charge_nodes = []
     power_supply_base = "/sys/class/power_supply"
-    if os.path.isdir(power_supply_base):
+    if _safe_is_dir(power_supply_base):
         for entry in sorted(os.listdir(power_supply_base)):
             base = os.path.join(power_supply_base, entry)
             charge_nodes.extend(_existing_paths([
@@ -491,9 +530,16 @@ def apply():
     # Verify
     if _is_module_loaded():
         steps.append("Module loaded successfully")
+        _log_info("oxpec loaded")
+        sysfs_nodes = _wait_for_sysfs_nodes()
+        _log_sysfs_nodes(sysfs_nodes)
         hwmon = _find_hwmon()
         if hwmon:
             steps.append(f"hwmon device at {hwmon}")
+        if sysfs_nodes.get("turbo_toggle_nodes"):
+            steps.append(f"tt_toggle at {sysfs_nodes['turbo_toggle_nodes'][0]}")
+        if sysfs_nodes.get("fan_control_nodes"):
+            steps.append(f"fan node at {sysfs_nodes['fan_control_nodes'][0]}")
         _log_info("oxpec applied successfully")
         return {"success": True, "message": "oxpec driver loaded", "steps": steps}
     else:

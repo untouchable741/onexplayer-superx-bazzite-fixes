@@ -75,6 +75,8 @@ TT_TOGGLE_RETRY_INTERVAL_SECS = 0.25
 
 
 def _read_sysfs_text(path):
+    if not path:
+        return None
     try:
         with open(path) as f:
             return f.read().strip()
@@ -106,6 +108,9 @@ def find_tt_toggle_paths():
     if os.path.isfile(TT_TOGGLE_EXACT_PATH):
         paths.append(TT_TOGGLE_EXACT_PATH)
 
+    if not os.path.isdir(TT_TOGGLE_SEARCH_ROOT):
+        return paths
+
     for root, _, files in os.walk(TT_TOGGLE_SEARCH_ROOT):
         if "tt_toggle" not in files:
             continue
@@ -127,6 +132,11 @@ def _wait_for_tt_toggle_paths(timeout_secs=TT_TOGGLE_RETRY_SECS):
 
 
 def enable_tt_toggle(retry=True):
+    if os.path.isdir(TT_TOGGLE_SEARCH_ROOT):
+        _log_info(f"oxp-platform found: {TT_TOGGLE_SEARCH_ROOT}")
+    else:
+        _log_warning(f"oxp-platform missing: {TT_TOGGLE_SEARCH_ROOT}")
+
     paths = _wait_for_tt_toggle_paths() if retry else find_tt_toggle_paths()
     if not paths:
         _log_warning(
@@ -140,6 +150,7 @@ def enable_tt_toggle(retry=True):
     final_value = None
     for path in paths:
         try:
+            _log_info(f"tt_toggle found: {path}")
             before = _read_sysfs_text(path)
             with open(path, "w") as f:
                 f.write("1\n")

@@ -178,7 +178,7 @@ export const FixesSection: FC<{
               description={
                 turboOverlay.tt_toggle_paths.length > 0
                   ? `Found: ${turboOverlay.tt_toggle_paths.join(", ")}`
-                  : "Will set tt_toggle=1 when oxpec exposes it"
+                  : "tt_toggle not detected"
               }
               checked={turboOverlay.tt_toggle_startup_enabled}
               disabled={loading.active === "ttToggle" || !turboOverlay.is_superx}
