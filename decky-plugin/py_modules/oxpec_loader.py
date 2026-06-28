@@ -1,4 +1,4 @@
-"""EC platform driver (oxpec) loader for OneXPlayer Apex.
+"""EC platform driver (oxpec) loader for ONEXPLAYER SUPER X.
 
 Installs and loads the oxpec kernel module which provides hwmon sensors
 and enables HHD native fan curves. Bundled .ko files are organized per
@@ -123,6 +123,44 @@ def _find_hwmon():
     return None
 
 
+def _existing_paths(paths):
+    """Return paths that currently exist."""
+    return [p for p in paths if os.path.exists(p)]
+
+
+def _find_sysfs_nodes():
+    """Find fan, charge, and turbo-takeover nodes exposed by oxpec."""
+    hwmon_path = _find_hwmon()
+    fan_nodes = []
+    turbo_nodes = []
+    if hwmon_path:
+        fan_nodes = _existing_paths([
+            os.path.join(hwmon_path, "fan1_input"),
+            os.path.join(hwmon_path, "pwm1"),
+            os.path.join(hwmon_path, "pwm1_enable"),
+        ])
+        turbo_nodes = _existing_paths([
+            os.path.join(hwmon_path, "tt_toggle"),
+            os.path.join(hwmon_path, "tt_led"),
+        ])
+
+    charge_nodes = []
+    power_supply_base = "/sys/class/power_supply"
+    if os.path.isdir(power_supply_base):
+        for entry in sorted(os.listdir(power_supply_base)):
+            base = os.path.join(power_supply_base, entry)
+            charge_nodes.extend(_existing_paths([
+                os.path.join(base, "charge_control_end_threshold"),
+                os.path.join(base, "charge_behaviour"),
+            ]))
+
+    return {
+        "fan_control_nodes": fan_nodes,
+        "charge_control_nodes": charge_nodes,
+        "turbo_toggle_nodes": turbo_nodes,
+    }
+
+
 def _is_module_loaded():
     """Check if oxpec module is currently loaded."""
     try:
@@ -180,6 +218,7 @@ def is_applied():
 
     module_loaded = _is_module_loaded()
     hwmon_path = _find_hwmon()
+    sysfs_nodes = _find_sysfs_nodes()
 
     # Determine load method if loaded
     load_method = None
@@ -230,6 +269,7 @@ def is_applied():
         "running_kernel": kernel,
         "bundled_kernels": bundled_kernels,
         "load_method": load_method,
+        **sysfs_nodes,
     }
 
 

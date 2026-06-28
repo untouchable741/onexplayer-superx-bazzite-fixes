@@ -17,6 +17,7 @@ __pycache__/
 
 # Decky plugin backups
 decky-plugin/backups/
+decky-plugin/OneXPlayer_Super_X_Tools*.zip
 
 # Lock files
 bun.lock

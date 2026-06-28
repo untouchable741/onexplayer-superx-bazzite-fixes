@@ -1,8 +1,7 @@
-"""OneXPlayer Apex Tools — Decky Loader plugin backend.
+"""ONEXPLAYER SUPER X Tools — Decky Loader plugin backend.
 
-Exposes methods for button fix, home button monitor, EC sensor driver,
-resume recovery, sleep enablement, and speaker DSP to the frontend
-via Decky's RPC bridge.
+For v0.1 this plugin exposes only the oxpec EC sensor driver flow used
+to validate SUPER X DMI recognition, fan hwmon nodes, and charge controls.
 
 Each async method in the Plugin class becomes an RPC endpoint that
 the React frontend can call via @decky/api's `callable()`.
@@ -19,6 +18,11 @@ import decky
 
 # Add py_modules to path so we can import our helper modules
 sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
+
+# Super X v0.1 intentionally does not apply Apex-specific HHD/controller
+# patches or start the Apex Home/Turbo/back-paddle watchers. Those remain
+# in-tree for later reference once oxpec is confirmed working.
+ENABLE_CONTROLLER_FIXES = False
 
 # Import helper modules with error handling so a single broken module
 # doesn't crash the entire plugin on load.
@@ -104,6 +108,24 @@ except Exception as e:
     decky.logger.error(f"Failed to import home_button: {e}")
     _home_button_mod = None
     HomeButtonMonitor = None
+
+try:
+    import superx_turbo as _superx_turbo_mod
+    from superx_turbo import (
+        SuperXTurboMonitor,
+        enable_tt_toggle as enable_tt_toggle_impl,
+        find_tt_toggle_paths,
+        get_dmi_info as get_superx_dmi_info,
+        is_superx as is_superx_device,
+    )
+except Exception as e:
+    decky.logger.error(f"Failed to import superx_turbo: {e}")
+    _superx_turbo_mod = None
+    SuperXTurboMonitor = None
+    enable_tt_toggle_impl = None
+    find_tt_toggle_paths = None
+    get_superx_dmi_info = None
+    is_superx_device = None
 
 try:
     import oxpec_loader as _oxpec_mod
@@ -196,7 +218,7 @@ def _get_user_home():
 
 
 # Log file path — write to Decky's plugin log directory
-LOG_FILE = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "oxp-apex.log")
+LOG_FILE = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "oxp-superx.log")
 
 
 def _log_to_file(msg: str):
@@ -205,7 +227,7 @@ def _log_to_file(msg: str):
         os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
         with open(LOG_FILE, "a") as f:
             from datetime import datetime
-            f.write(f"{datetime.now().isoformat()} [OXP-Apex] {msg}\n")
+            f.write(f"{datetime.now().isoformat()} [OXP-SuperX] {msg}\n")
     except Exception:
         pass
 
@@ -225,13 +247,15 @@ def _log_warning(msg: str):
     _log_to_file(f"WARN: {msg}")
 
 
-# Wire log callbacks into helper modules so their logs appear in oxp-apex.log
+# Wire log callbacks into helper modules so their logs appear in oxp-superx.log
 if _button_fix_mod:
     _button_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _back_paddle_mod:
     _back_paddle_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _home_button_mod:
     _home_button_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _superx_turbo_mod:
+    _superx_turbo_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _speaker_dsp_mod:
     _speaker_dsp_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _oxpec_mod:
@@ -287,6 +311,10 @@ class Plugin:
     home_monitor = None
     # Back paddle firmware remap monitor instance
     paddle_monitor = None
+    # Super X Turbo button -> HHD overlay monitor instance
+    turbo_monitor = None
+    turbo_overlay_enabled = True
+    tt_toggle_startup_enabled = True
 
     async def _main(self):
         """Plugin entry point — called by Decky on load."""
@@ -294,24 +322,23 @@ class Plugin:
             from build_info import BUILD_ID
         except ImportError:
             BUILD_ID = "unknown"
-        _log_info(f"OneXPlayer Apex Tools starting ({BUILD_ID})")
+        _log_info(f"ONEXPLAYER SUPER X Tools starting ({BUILD_ID})")
         _log_info(f"Plugin dir: {decky.DECKY_PLUGIN_DIR}")
         _log_info(f"Log dir: {decky.DECKY_PLUGIN_LOG_DIR}")
+        if get_superx_dmi_info:
+            dmi = get_superx_dmi_info()
+            _log_info(
+                "Detected DMI: "
+                f"vendor={dmi.get('board_vendor') or 'unknown'}, "
+                f"board={dmi.get('board_name') or 'unknown'}"
+            )
 
-        # Create monitor instances (started automatically with button fix)
-        if HomeButtonMonitor:
-            self.home_monitor = HomeButtonMonitor()
-        else:
-            _log_warning("home_button module not available")
-        if BackPaddleMonitor:
-            self.paddle_monitor = BackPaddleMonitor()
-        else:
-            _log_warning("back_paddle module not available")
+        # Controller/HHD helpers are disabled for Super X v0.1. This build is
+        # intentionally scoped to oxpec EC recognition and sysfs validation.
 
-        # Recover xHCI controller if internal gamepad USB devices are missing
-        # (xHCI 0000:65:00.4 sometimes dies during boot on the Apex)
+        # Apex xHCI gamepad recovery is intentionally not run for Super X v0.1.
         hhd_restart_needed = False
-        if xhci_check_and_recover:
+        if False and xhci_check_and_recover:
             try:
                 result = await asyncio.to_thread(xhci_check_and_recover)
                 if result.get("needed") and result.get("success"):
@@ -333,15 +360,23 @@ class Plugin:
                     hhd_restart_needed = True
                 elif result.get("already_loaded"):
                     _log_info("oxpec already loaded")
+                else:
+                    _log_warning(f"oxpec auto-load status: {result}")
             except Exception as e:
                 _log_error(f"oxpec auto-load failed: {e}")
+
+        if self.tt_toggle_startup_enabled:
+            self._enable_tt_toggle()
+
+        if self.turbo_overlay_enabled:
+            self._start_turbo_monitor()
 
         if hhd_restart_needed:
             _log_info("Restarting HHD to pick up recovered hardware")
             _restart_hhd()
 
-        # Auto-start monitors if button fix is already applied
-        if button_fix_status:
+        # Apex controller monitors are intentionally disabled for Super X v0.1.
+        if ENABLE_CONTROLLER_FIXES and button_fix_status:
             status = button_fix_status()
             if status.get("applied"):
                 _log_info("Button fix already applied — auto-starting monitors")
@@ -350,7 +385,7 @@ class Plugin:
 
     async def _unload(self):
         """Plugin teardown — called by Decky on unload."""
-        _log_info("OneXPlayer Apex Tools unloading")
+        _log_info("ONEXPLAYER SUPER X Tools unloading")
         # Stop test sound if playing
         if stop_test_sound_impl:
             try:
@@ -362,21 +397,24 @@ class Plugin:
             await self.paddle_monitor.stop()
         if self.home_monitor:
             await self.home_monitor.stop()
+        if self.turbo_monitor:
+            await self.turbo_monitor.stop()
 
     # -- Status overview --
 
     async def get_status(self):
         """Get combined status of all features — called by the frontend on load."""
-        bf_status = button_fix_status() if button_fix_status else {"applied": False, "error": "module not loaded"}
+        bf_status = {"applied": False, "error": "Disabled for Super X v0.1"}
         bf_status["home_monitor_running"] = self.home_monitor.is_running if self.home_monitor else False
         bf_status["paddle_monitor_running"] = self.paddle_monitor.is_running if self.paddle_monitor else False
         return {
             "button_fix": bf_status,
-            "light_sleep": sleep_fix_status() if sleep_fix_status else {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []},
-            "speaker_dsp": speaker_dsp_status() if speaker_dsp_status else {"enabled": False, "profile": None, "speaker_node": None},
+            "light_sleep": {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []},
+            "speaker_dsp": {"enabled": False, "profile": None, "speaker_node": None},
             "oxpec": oxpec_status() if oxpec_status else {"applied": False, "error": "module not loaded"},
-            "resume_fix": resume_fix_status() if resume_fix_status else {"applied": False, "error": "module not loaded"},
-            "sleep_enable": sleep_enable_status() if sleep_enable_status else {"applied": False, "error": "module not loaded"},
+            "resume_fix": {"applied": False, "error": "Disabled for Super X v0.1"},
+            "sleep_enable": {"applied": False, "error": "Disabled for Super X v0.1"},
+            "turbo_overlay": self._get_turbo_overlay_status(),
         }
 
     # -- Logs --
@@ -400,7 +438,7 @@ class Plugin:
             downloads = os.path.join(user_home, "Downloads")
             os.makedirs(downloads, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            dest = os.path.join(downloads, f"oxp-apex-logs_{ts}.log")
+            dest = os.path.join(downloads, f"oxp-superx-logs_{ts}.log")
             shutil.copy2(LOG_FILE, dest)
             _log_info(f"Logs saved to {dest}")
             return {"success": True, "path": dest}
@@ -413,11 +451,18 @@ class Plugin:
     # Requires ostree filesystem unlock since Bazzite is immutable.
 
     async def get_button_fix_status(self):
+        if not ENABLE_CONTROLLER_FIXES:
+            return {"applied": False, "error": "Disabled for Super X v0.1"}
         if not button_fix_status:
             return {"applied": False, "error": "module not loaded"}
         return button_fix_status()
 
     async def apply_button_fix(self):
+        if not ENABLE_CONTROLLER_FIXES:
+            return {
+                "success": False,
+                "error": "Apex HHD/controller fixes are disabled for Super X v0.1; this build only validates oxpec.",
+            }
         if not apply_button_fix_impl:
             return {"success": False, "error": "button_fix module not loaded"}
         _log_info("Applying button fix...")
@@ -435,6 +480,11 @@ class Plugin:
             return {"success": False, "error": str(e)}
 
     async def revert_button_fix(self):
+        if not ENABLE_CONTROLLER_FIXES:
+            return {
+                "success": True,
+                "message": "Apex HHD/controller fixes are disabled for Super X v0.1.",
+            }
         if not revert_button_fix_impl:
             return {"success": False, "error": "button_fix module not loaded"}
         _log_info("Reverting button fix...")
@@ -669,6 +719,77 @@ class Plugin:
             await self.paddle_monitor.stop()
             _log_info("Back paddle monitor stopped")
 
+    # -- Super X Turbo Overlay Monitor --
+
+    def _get_turbo_overlay_status(self):
+        dmi = get_superx_dmi_info() if get_superx_dmi_info else {}
+        tt_paths = find_tt_toggle_paths() if find_tt_toggle_paths else []
+        return {
+            "enabled": self.turbo_overlay_enabled,
+            "running": self.turbo_monitor.is_running if self.turbo_monitor else False,
+            "tt_toggle_startup_enabled": self.tt_toggle_startup_enabled,
+            "tt_toggle_paths": tt_paths,
+            "is_superx": (
+                dmi.get("board_vendor") == "ONE-NETBOOK"
+                and dmi.get("board_name") == "ONEXPLAYER SUPER X"
+            ),
+            "board_vendor": dmi.get("board_vendor"),
+            "board_name": dmi.get("board_name"),
+        }
+
+    def _enable_tt_toggle(self):
+        if not enable_tt_toggle_impl:
+            _log_warning("Cannot enable tt_toggle — superx_turbo module not loaded")
+            return {"success": False, "error": "superx_turbo module not loaded"}
+        if is_superx_device and not is_superx_device():
+            _log_warning("Skipping tt_toggle because DMI does not match ONEXPLAYER SUPER X")
+            return {"success": False, "error": "not ONEXPLAYER SUPER X"}
+        return enable_tt_toggle_impl()
+
+    def _start_turbo_monitor(self):
+        if is_superx_device and not is_superx_device():
+            _log_warning("Not starting Turbo watcher because DMI does not match ONEXPLAYER SUPER X")
+            return
+        if not self.turbo_monitor:
+            if SuperXTurboMonitor:
+                self.turbo_monitor = SuperXTurboMonitor()
+            else:
+                _log_warning("Cannot start Turbo watcher — module not loaded")
+                return
+        if not self.turbo_monitor.is_running:
+            loop = asyncio.get_event_loop()
+            self.turbo_monitor.start(loop)
+            _log_info("Super X Turbo overlay watcher started")
+
+    async def _stop_turbo_monitor(self):
+        if self.turbo_monitor and self.turbo_monitor.is_running:
+            await self.turbo_monitor.stop()
+            _log_info("Super X Turbo overlay watcher stopped")
+
+    async def get_turbo_overlay_status(self):
+        return self._get_turbo_overlay_status()
+
+    async def set_turbo_overlay_enabled(self, enabled: bool):
+        self.turbo_overlay_enabled = bool(enabled)
+        if self.turbo_overlay_enabled:
+            self._start_turbo_monitor()
+            return {"success": True, "message": "Turbo overlay watcher enabled"}
+        await self._stop_turbo_monitor()
+        return {"success": True, "message": "Turbo overlay watcher disabled"}
+
+    async def set_tt_toggle_startup_enabled(self, enabled: bool):
+        self.tt_toggle_startup_enabled = bool(enabled)
+        if self.tt_toggle_startup_enabled:
+            result = await asyncio.to_thread(self._enable_tt_toggle)
+            if result.get("success"):
+                return {"success": True, "message": "tt_toggle enabled"}
+            return {
+                "success": True,
+                "warning": result.get("error", "tt_toggle not available"),
+                "message": "tt_toggle will be enabled on startup when available",
+            }
+        return {"success": True, "message": "tt_toggle startup enable disabled"}
+
     # -- oxpec EC Sensor Driver --
 
     async def get_oxpec_status(self):
@@ -684,6 +805,8 @@ class Plugin:
             result = await asyncio.to_thread(apply_oxpec_impl)
             if result.get("success"):
                 _log_info(f"oxpec applied: {result.get('message', 'OK')}")
+                if self.tt_toggle_startup_enabled:
+                    await asyncio.to_thread(self._enable_tt_toggle)
                 # Restart HHD so it detects the new hwmon for fan control
                 await asyncio.to_thread(_restart_hhd)
             else:

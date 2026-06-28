@@ -34,11 +34,7 @@ jobs:
       - name: Package plugin
         working-directory: decky-plugin
         run: |
-          mkdir -p "OneXPlayer Apex Tools/dist" "OneXPlayer Apex Tools/py_modules" "OneXPlayer Apex Tools/logs"
-          cp package.json plugin.json main.py "OneXPlayer Apex Tools/"
-          cp dist/index.js "OneXPlayer Apex Tools/dist/"
-          cp py_modules/*.py "OneXPlayer Apex Tools/py_modules/"
-          zip -r OneXPlayer_Apex_Tools.zip "OneXPlayer Apex Tools"
+          bun run package
 
       - name: Get short SHA
         id: sha
@@ -53,8 +49,8 @@ jobs:
             Automated build from commit ${{ github.sha }}.
 
             ## Installation
-            1. Download `OneXPlayer_Apex_Tools.zip`
+            1. Download `OneXPlayer_Super_X_Tools.zip`
             2. Extract to `~/homebrew/plugins/`
             3. Restart Decky: `sudo systemctl restart plugin_loader.service`
-          files: decky-plugin/OneXPlayer_Apex_Tools.zip
+          files: decky-plugin/OneXPlayer_Super_X_Tools.zip
           make_latest: true

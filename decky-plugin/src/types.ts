@@ -10,6 +10,9 @@ export interface OxpecStatus {
   module_loaded?: boolean;
   service_enabled?: boolean;
   hwmon_path?: string | null;
+  fan_control_nodes?: string[];
+  charge_control_nodes?: string[];
+  turbo_toggle_nodes?: string[];
   kernel_compatible?: boolean | null;
   running_kernel?: string;
   bundled_kernels?: string[];
@@ -49,6 +52,17 @@ export interface StatusResponse {
   oxpec: OxpecStatus;
   resume_fix: ResumeFixStatus;
   sleep_enable: SleepEnableStatus;
+  turbo_overlay: TurboOverlayStatus;
+}
+
+export interface TurboOverlayStatus {
+  enabled: boolean;
+  running: boolean;
+  tt_toggle_startup_enabled: boolean;
+  tt_toggle_paths: string[];
+  is_superx: boolean;
+  board_vendor?: string | null;
+  board_name?: string | null;
 }
 
 export interface FixResult {
