@@ -89,26 +89,58 @@ def _toggle_hhd_overlay():
         _log_error(f"HHD token not found at {token_path}")
         return
 
-    # Use the state endpoint to toggle the overlay
-    url = "http://localhost:5335/api/v1/state"
-    payload = json.dumps({"shortcuts": {"open_hhd": True}}).encode()
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        resp = urllib.request.urlopen(req, timeout=5)
-        _log_info(f"HHD overlay toggle: HTTP {resp.status}")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")[:200]
-        _log_error(f"HHD API error {e.code}: {body}")
-    except Exception as e:
-        _log_error(f"HHD API request failed: {e}")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    def post_json(url, body):
+        payload_text = json.dumps(body)
+        payload = payload_text.encode()
+        _log_info(f"HHD API request: method=POST url={url} body={payload_text}")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=5)
+            response_body = resp.read().decode(errors="replace")
+            _log_info(
+                "HHD API response: "
+                f"code={resp.status} body={response_body[:500]}"
+            )
+            return resp.status, response_body
+        except urllib.error.HTTPError as e:
+            body_text = e.read().decode(errors="replace")
+            _log_error(
+                "HHD API error: "
+                f"code={e.code} url={url} body={body_text[:500]}"
+            )
+            return e.code, body_text
+        except Exception as e:
+            _log_error(f"HHD API request failed: url={url} error={e}")
+            return None, str(e)
+
+    # HHD 4.x exposes /api/v1/event for command-style actions. The overlay
+    # plugin maps this special event to its internal open_qam command.
+    event_url = "http://localhost:5335/api/v1/event"
+    event_body = {"type": "special", "event": "overlay"}
+    status, _ = post_json(event_url, event_body)
+    if status and 200 <= status < 300:
+        _log_info("HHD overlay toggle requested via /api/v1/event special overlay")
+        return
+
+    # Legacy fallback: pulse the old state shortcut instead of leaving it stuck
+    # at true. On newer HHD this may update state without opening the overlay.
+    state_url = "http://localhost:5335/api/v1/state"
+    _log_warning("HHD event overlay request failed; falling back to legacy state shortcut pulse")
+    for value in (True, False):
+        status, _ = post_json(state_url, {"shortcuts": {"open_hhd": value}})
+        if not status or not 200 <= status < 300:
+            return
+    _log_info("HHD overlay toggle requested via legacy state shortcut pulse")
 
 
 def find_hidraw_device():
