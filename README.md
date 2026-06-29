@@ -18,6 +18,7 @@ Tested:
 - Watches evdev for Turbo's `Ctrl + Meta + Alt` chord and opens the HHD overlay.
 - Detects kernel/module mismatch and can rebuild `oxpec.ko` on-device when kernel
   headers and build tools are already installed.
+- Keeps debug logging off by default for long-session keyboard/input performance.
 
 ## Not Included
 
@@ -40,6 +41,19 @@ Super X-specific HHD TDP profile.
 External keyboard `Ctrl + Meta + Alt` also opens the HHD overlay in v0.9-beta.
 This is intentional for this preview; the watcher does not restrict by keyboard
 device yet.
+
+Debug logging is off by default. Enable it only while troubleshooting; it adds
+verbose evdev candidate, key, debounce, and HHD API request/response logs.
+
+If keyboard input becomes laggy:
+
+1. Disable **Debug logging**.
+2. Disable **Turbo -> HHD Overlay**.
+3. Restart Decky's plugin loader:
+
+```bash
+sudo systemctl restart plugin_loader.service
+```
 
 ## Build
 
@@ -105,6 +119,7 @@ sudo tail -n 150 ~/homebrew/logs/ONEXPLAYER\ SUPER\ X\ Tools/oxp-superx.log
 - Suspend/resume and confirm sysfs nodes still appear.
 - Turbo opens the HHD overlay.
 - External keyboard `Ctrl + Meta + Alt` opens the HHD overlay intentionally.
+- Debug logging remains off during normal typing and does not spam logs.
 - Fan control changes RPM in HHD.
 - Charge limit changes the sysfs value.
 - Bypass works while plugged in.

@@ -28,6 +28,7 @@ logger = logging.getLogger("OXP-HomeButton")
 _log_info_cb = None
 _log_error_cb = None
 _log_warning_cb = None
+_debug_enabled = False
 
 
 def set_log_callbacks(info_fn, error_fn, warning_fn):
@@ -36,6 +37,11 @@ def set_log_callbacks(info_fn, error_fn, warning_fn):
     _log_info_cb = info_fn
     _log_error_cb = error_fn
     _log_warning_cb = warning_fn
+
+
+def set_debug_logging(enabled):
+    global _debug_enabled
+    _debug_enabled = bool(enabled)
 
 
 def _log_info(msg):
@@ -57,6 +63,11 @@ def _log_warning(msg):
         _log_warning_cb(msg)
     else:
         logger.warning(msg)
+
+
+def _log_debug(msg):
+    if _debug_enabled:
+        _log_info(f"DEBUG: {msg}")
 
 
 # USB VID:PID for the Apex's secondary keyboard HID device
@@ -97,7 +108,7 @@ def _toggle_hhd_overlay():
     def post_json(url, body):
         payload_text = json.dumps(body)
         payload = payload_text.encode()
-        _log_info(f"HHD API request: method=POST url={url} body={payload_text}")
+        _log_debug(f"HHD API request: method=POST url={url} body={payload_text}")
         req = urllib.request.Request(
             url,
             data=payload,
@@ -107,7 +118,7 @@ def _toggle_hhd_overlay():
         try:
             resp = urllib.request.urlopen(req, timeout=5)
             response_body = resp.read().decode(errors="replace")
-            _log_info(
+            _log_debug(
                 "HHD API response: "
                 f"code={resp.status} body={response_body[:500]}"
             )

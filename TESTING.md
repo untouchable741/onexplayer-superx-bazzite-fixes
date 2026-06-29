@@ -37,6 +37,8 @@ Expected:
 - Press Turbo and confirm HHD overlay opens.
 - Press external keyboard `Ctrl + Meta + Alt` and confirm it also opens overlay.
   This is intentional/known behavior for v0.9-beta.
+- Confirm normal typing does not spam logs with Debug logging off.
+- Toggle **Debug logging** on/off and confirm it does not spawn duplicate watchers.
 - Confirm kernel mismatch warning appears when the bundled module does not match
   `uname -r`.
 - Press **Rebuild oxpec** and confirm rebuild succeeds if kernel headers/build
@@ -73,9 +75,22 @@ Look for:
 - kernel mismatch or vermagic match.
 - `tt_toggle` path/value.
 - fan and charge paths.
-- evdev candidate/selected device.
 - Turbo chord detected.
-- HHD overlay API request/response.
+- HHD overlay launch result.
+
+Debug logging is off by default. Enable it only for troubleshooting. With debug
+enabled, logs may include evdev candidates, selected devices, key down/up events,
+debounce state, and full HHD API request/response details.
+
+If keyboard input becomes laggy:
+
+1. Disable **Debug logging**.
+2. Disable **Turbo -> HHD Overlay**.
+3. Restart Decky's plugin loader:
+
+```bash
+sudo systemctl restart plugin_loader.service
+```
 
 ## TDP Safety
 

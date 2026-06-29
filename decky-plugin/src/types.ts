@@ -65,6 +65,9 @@ export interface StatusResponse {
 export interface TurboOverlayStatus {
   enabled: boolean;
   running: boolean;
+  watched_device_count?: number;
+  task_id?: number | null;
+  debug_logging_enabled: boolean;
   tt_toggle_startup_enabled: boolean;
   tt_toggle_paths: string[];
   is_superx: boolean;

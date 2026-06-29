@@ -26,6 +26,8 @@ logger = logging.getLogger("OXP-SuperXTurbo")
 _log_info_cb = None
 _log_error_cb = None
 _log_warning_cb = None
+_debug_enabled = False
+_last_warning = {}
 
 
 def set_log_callbacks(info_fn, error_fn, warning_fn):
@@ -33,6 +35,15 @@ def set_log_callbacks(info_fn, error_fn, warning_fn):
     _log_info_cb = info_fn
     _log_error_cb = error_fn
     _log_warning_cb = warning_fn
+
+
+def set_debug_logging(enabled):
+    global _debug_enabled
+    _debug_enabled = bool(enabled)
+
+
+def is_debug_logging_enabled():
+    return _debug_enabled
 
 
 def _log_info(msg):
@@ -54,6 +65,19 @@ def _log_warning(msg):
         _log_warning_cb(msg)
     else:
         logger.warning(msg)
+
+
+def _log_debug(msg):
+    if _debug_enabled:
+        _log_info(f"DEBUG: {msg}")
+
+
+def _log_warning_rate_limited(key, msg, interval_secs=30.0):
+    now = time.monotonic()
+    last = _last_warning.get(key, 0.0)
+    if now - last >= interval_secs:
+        _last_warning[key] = now
+        _log_warning(msg)
 
 
 SUPERX_VENDOR = "ONE-NETBOOK"
@@ -124,7 +148,7 @@ def get_dmi_info():
 def is_superx():
     dmi = get_dmi_info()
     detected = dmi["board_vendor"] == SUPERX_VENDOR and dmi["board_name"] == SUPERX_BOARD
-    _log_info(
+    _log_debug(
         "DMI detected: "
         f"vendor={dmi['board_vendor'] or 'unknown'}, "
         f"board={dmi['board_name'] or 'unknown'}, "
@@ -163,7 +187,7 @@ def _wait_for_tt_toggle_paths(timeout_secs=TT_TOGGLE_RETRY_SECS):
 
 def enable_tt_toggle(retry=True):
     if os.path.isdir(TT_TOGGLE_SEARCH_ROOT):
-        _log_info(f"oxp-platform found: {TT_TOGGLE_SEARCH_ROOT}")
+        _log_debug(f"oxp-platform found: {TT_TOGGLE_SEARCH_ROOT}")
     else:
         _log_warning(f"oxp-platform missing: {TT_TOGGLE_SEARCH_ROOT}")
 
@@ -180,7 +204,7 @@ def enable_tt_toggle(retry=True):
     final_value = None
     for path in paths:
         try:
-            _log_info(f"tt_toggle found: {path}")
+            _log_debug(f"tt_toggle found: {path}")
             before = _read_sysfs_text(path)
             with open(path, "w") as f:
                 f.write("1\n")
@@ -254,21 +278,21 @@ def find_evdev_devices():
         try:
             fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
         except OSError as e:
-            _log_warning(f"evdev candidate inaccessible: {dev_path} error={e}")
+            _log_debug(f"evdev candidate inaccessible: {dev_path} error={e}")
             continue
 
         try:
             dev_name = _event_name(dev_path, fd)
             supported = _supported_keys(fd)
             supported_names = [KEY_NAMES[key] for key in sorted(supported)]
-            _log_info(
+            _log_debug(
                 "evdev candidate: "
                 f"path={dev_path} name={dev_name!r} supports={supported_names}"
             )
             if TURBO_KEYS.issubset(supported):
                 devices.append({"dev_path": dev_path, "name": dev_name})
         except OSError as e:
-            _log_warning(f"evdev candidate failed capability scan: {dev_path} error={e}")
+            _log_debug(f"evdev candidate failed capability scan: {dev_path} error={e}")
         finally:
             try:
                 os.close(fd)
@@ -283,14 +307,41 @@ class SuperXTurboMonitor:
     def __init__(self):
         self._task = None
         self._running = False
+        self._fds = {}
+        self._watched_device_count = 0
 
     @property
     def is_running(self):
         return self._task is not None and not self._task.done()
 
+    @property
+    def watched_device_count(self):
+        return self._watched_device_count
+
+    @property
+    def task_id(self):
+        return id(self._task) if self._task else None
+
+    def status(self):
+        return {
+            "running": self.is_running,
+            "watched_device_count": self._watched_device_count,
+            "task_id": self.task_id,
+        }
+
+    def _close_fds(self):
+        for fd in list(self._fds.keys()):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._fds = {}
+        self._watched_device_count = 0
+
     async def _monitor_loop(self):
         self._running = True
         last_trigger = 0.0
+        _log_debug(f"Turbo watcher task started id={id(asyncio.current_task())}")
 
         if not is_superx():
             _log_warning("Super X Turbo watcher disabled because DMI does not match ONEXPLAYER SUPER X")
@@ -309,37 +360,47 @@ class SuperXTurboMonitor:
         while self._running:
             devices = find_evdev_devices()
             if not devices:
-                _log_warning("No evdev keyboard-capable devices found for Super X Turbo watcher, retrying in 5s")
+                _log_warning_rate_limited(
+                    "no_evdev_devices",
+                    "No evdev keyboard-capable devices found for Super X Turbo watcher, retrying in 5s",
+                )
                 await asyncio.sleep(5)
                 continue
 
             fds = {}
             state = {}
             try:
+                self._close_fds()
                 for dev in devices:
                     try:
                         fd = os.open(dev["dev_path"], os.O_RDONLY | os.O_NONBLOCK)
                         fds[fd] = dev
+                        self._fds[fd] = dev
                         state[fd] = {
                             "pressed": set(),
                             "down_times": {},
                             "chord_active": False,
                         }
-                        _log_info(
+                        _log_debug(
                             "Selected evdev device for Turbo watcher: "
                             f"path={dev['dev_path']} name={dev['name']!r}"
                         )
                     except OSError as e:
-                        _log_warning(f"Could not open {dev['dev_path']}: {e}")
+                        _log_warning_rate_limited(
+                            f"open_{dev['dev_path']}",
+                            f"Could not open {dev['dev_path']}: {e}",
+                        )
 
                 if not fds:
                     await asyncio.sleep(5)
                     continue
+                self._watched_device_count = len(fds)
+                _log_info(f"Super X Turbo watcher active on {self._watched_device_count} evdev device(s)")
 
                 while self._running:
-                    ready, _, _ = select.select(list(fds.keys()), [], [], 0.1)
+                    ready, _, _ = select.select(list(fds.keys()), [], [], 1.0)
                     if not ready:
-                        await asyncio.sleep(0.02)
+                        await asyncio.sleep(0)
                         continue
 
                     for fd in ready:
@@ -362,12 +423,12 @@ class SuperXTurboMonitor:
 
                             if value in (1, 2):
                                 if code not in dev_state["pressed"]:
-                                    _log_info(f"Turbo key down: {key_name} on {dev['dev_path']}")
+                                    _log_debug(f"Turbo key down: {key_name} on {dev['dev_path']}")
                                     dev_state["down_times"][code] = now
                                 dev_state["pressed"].add(code)
                             elif value == 0:
                                 if code in dev_state["pressed"]:
-                                    _log_info(f"Turbo key up: {key_name} on {dev['dev_path']}")
+                                    _log_debug(f"Turbo key up: {key_name} on {dev['dev_path']}")
                                 dev_state["pressed"].discard(code)
                                 dev_state["down_times"].pop(code, None)
                                 dev_state["chord_active"] = False
@@ -379,10 +440,13 @@ class SuperXTurboMonitor:
                                 continue
                             times = [dev_state["down_times"].get(key, now) for key in TURBO_KEYS]
                             if max(times) - min(times) > CHORD_WINDOW_SECS:
+                                _log_debug("Turbo chord ignored: key timing outside chord window")
                                 continue
                             if dev_state["chord_active"]:
+                                _log_debug("Turbo chord ignored: chord already active")
                                 continue
                             if now - last_trigger < DEBOUNCE_SECS:
+                                _log_debug("Turbo chord ignored: debounce active")
                                 continue
 
                             dev_state["chord_active"] = True
@@ -394,22 +458,23 @@ class SuperXTurboMonitor:
                             _toggle_hhd_overlay()
                             _log_info("Overlay launch called via existing HHD state API")
             except OSError as e:
-                _log_warning(f"evdev device changed/disconnected: {e}; retrying in 5s")
+                _log_warning_rate_limited("evdev_changed", f"evdev device changed/disconnected: {e}; retrying in 5s")
                 await asyncio.sleep(5)
             finally:
-                for fd in list(fds.keys()):
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
+                self._close_fds()
+        _log_debug("Turbo watcher loop exited")
 
     def start(self, loop):
-        if not self.is_running:
-            self._running = True
-            self._task = loop.create_task(self._monitor_loop())
+        if self.is_running:
+            _log_debug(f"Turbo watcher already running task_id={self.task_id}")
+            return False
+        self._running = True
+        self._task = loop.create_task(self._monitor_loop())
+        return True
 
     async def stop(self):
         self._running = False
+        self._close_fds()
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -417,3 +482,4 @@ class SuperXTurboMonitor:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        self._close_fds()

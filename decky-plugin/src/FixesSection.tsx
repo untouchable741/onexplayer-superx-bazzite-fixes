@@ -6,7 +6,7 @@ import {
   ToggleField,
 } from "@decky/ui";
 import type { LoadingState, ResultMessage, OxpecStatus, TurboOverlayStatus } from "./types";
-import { applyOxpec, rebuildOxpec, revertOxpec, setTtToggleStartupEnabled, setTurboOverlayEnabled } from "./rpc";
+import { applyOxpec, rebuildOxpec, revertOxpec, setDebugLoggingEnabled, setTtToggleStartupEnabled, setTurboOverlayEnabled } from "./rpc";
 import { InlineStatus } from "./InlineStatus";
 
 const NodeList: FC<{ title: string; nodes?: string[] }> = ({ title, nodes }) => (
@@ -85,6 +85,27 @@ export const FixesSection: FC<{
       }
     } catch (e) {
       showResult("ttToggle", `Error: ${e}`, "error");
+    } finally {
+      setLoading({ active: null, message: "" });
+      refresh();
+    }
+  };
+
+  const handleDebugLogging = async (enabled: boolean) => {
+    setLoading({
+      active: "debugLogging",
+      message: enabled ? "Enabling debug logging..." : "Disabling debug logging...",
+    });
+    try {
+      const res = await setDebugLoggingEnabled(enabled);
+      if (res.success) {
+        setTurboOverlay((prev) => ({ ...prev, debug_logging_enabled: enabled }));
+        showResult("debugLogging", res.message || "Updated", "success");
+      } else {
+        showResult("debugLogging", res.error || "Failed", "error");
+      }
+    } catch (e) {
+      showResult("debugLogging", `Error: ${e}`, "error");
     } finally {
       setLoading({ active: null, message: "" });
       refresh();
@@ -189,6 +210,10 @@ export const FixesSection: FC<{
               <NodeList title="Fan nodes" nodes={oxpec.fan_control_nodes} />
               <NodeList title="Charge nodes" nodes={oxpec.charge_control_nodes} />
               <NodeList title="Turbo takeover nodes" nodes={oxpec.turbo_toggle_nodes} />
+              <div><strong>Turbo watcher:</strong> {turboOverlay.running ? "running" : "stopped"}</div>
+              <div><strong>Watched devices:</strong> {turboOverlay.watched_device_count ?? 0}</div>
+              <div><strong>Debug logging:</strong> {turboOverlay.debug_logging_enabled ? "enabled" : "disabled"}</div>
+              {turboOverlay.task_id ? <div><strong>Task:</strong> {turboOverlay.task_id}</div> : null}
             </div>
           </PanelSectionRow>
           <PanelSectionRow>
@@ -207,6 +232,20 @@ export const FixesSection: FC<{
             />
           </PanelSectionRow>
           <InlineStatus loading={loading} result={result} section="turboOverlay" />
+          <PanelSectionRow>
+            <ToggleField
+              label="Debug logging"
+              description={
+                turboOverlay.debug_logging_enabled
+                  ? "Verbose device/key/API logs enabled"
+                  : "Off by default; enable only for troubleshooting"
+              }
+              checked={turboOverlay.debug_logging_enabled}
+              disabled={loading.active === "debugLogging"}
+              onChange={handleDebugLogging}
+            />
+          </PanelSectionRow>
+          <InlineStatus loading={loading} result={result} section="debugLogging" />
           <PanelSectionRow>
             <ToggleField
               label="Enable tt_toggle on Startup"

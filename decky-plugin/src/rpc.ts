@@ -27,6 +27,7 @@ export const revertOxpec = callable<[], FixResult>("revert_oxpec");
 export const rebuildOxpec = callable<[], FixResult>("rebuild_oxpec");
 export const setTurboOverlayEnabled = callable<[boolean], FixResult>("set_turbo_overlay_enabled");
 export const setTtToggleStartupEnabled = callable<[boolean], FixResult>("set_tt_toggle_startup_enabled");
+export const setDebugLoggingEnabled = callable<[boolean], FixResult>("set_debug_logging_enabled");
 
 // Resume recovery (gamepad after sleep)
 export const applyResumeFix = callable<[], FixResult>("apply_resume_fix");

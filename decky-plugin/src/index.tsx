@@ -12,6 +12,9 @@ const Content: FC = () => {
   const [turboOverlay, setTurboOverlay] = useState<TurboOverlayStatus>({
     enabled: true,
     running: false,
+    watched_device_count: 0,
+    task_id: null,
+    debug_logging_enabled: false,
     tt_toggle_startup_enabled: true,
     tt_toggle_paths: [],
     is_superx: false,

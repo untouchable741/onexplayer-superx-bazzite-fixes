@@ -8,6 +8,7 @@ the React frontend can call via @decky/api's `callable()`.
 """
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -216,6 +217,7 @@ def _get_user_home():
 
 # Log file path — write to Decky's plugin log directory
 LOG_FILE = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "oxp-superx.log")
+SETTINGS_FILE = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "settings.json")
 
 
 def _log_to_file(msg: str):
@@ -242,6 +244,15 @@ def _log_error(msg: str):
 def _log_warning(msg: str):
     decky.logger.warning(msg)
     _log_to_file(f"WARN: {msg}")
+
+
+def _set_helper_debug_logging(enabled: bool):
+    for mod in (_home_button_mod, _superx_turbo_mod):
+        if mod and hasattr(mod, "set_debug_logging"):
+            try:
+                mod.set_debug_logging(enabled)
+            except Exception as e:
+                _log_warning(f"Failed to set debug logging on {mod.__name__}: {e}")
 
 
 # Wire log callbacks into helper modules so their logs appear in oxp-superx.log
@@ -312,6 +323,34 @@ class Plugin:
     turbo_monitor = None
     turbo_overlay_enabled = True
     tt_toggle_startup_enabled = True
+    debug_logging_enabled = False
+
+    def _load_settings(self):
+        try:
+            with open(SETTINGS_FILE) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}
+        except Exception as e:
+            _log_warning(f"Failed to load settings: {e}")
+            data = {}
+        self.turbo_overlay_enabled = bool(data.get("turbo_overlay_enabled", self.turbo_overlay_enabled))
+        self.tt_toggle_startup_enabled = bool(data.get("tt_toggle_startup_enabled", self.tt_toggle_startup_enabled))
+        self.debug_logging_enabled = bool(data.get("debug_logging_enabled", False))
+        _set_helper_debug_logging(self.debug_logging_enabled)
+
+    def _save_settings(self):
+        data = {
+            "turbo_overlay_enabled": self.turbo_overlay_enabled,
+            "tt_toggle_startup_enabled": self.tt_toggle_startup_enabled,
+            "debug_logging_enabled": self.debug_logging_enabled,
+        }
+        try:
+            os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            _log_warning(f"Failed to save settings: {e}")
 
     def _get_dmi_info(self):
         if get_superx_dmi_info:
@@ -334,6 +373,8 @@ class Plugin:
         _log_info(f"ONEXPLAYER SUPER X Tools starting ({BUILD_ID})")
         _log_info(f"Plugin dir: {decky.DECKY_PLUGIN_DIR}")
         _log_info(f"Log dir: {decky.DECKY_PLUGIN_LOG_DIR}")
+        self._load_settings()
+        _log_info(f"Debug logging: {'enabled' if self.debug_logging_enabled else 'disabled'}")
         is_superx = self._is_superx()
         dmi = self._get_dmi_info()
         _log_info(
@@ -761,9 +802,13 @@ class Plugin:
     def _get_turbo_overlay_status(self):
         dmi = get_superx_dmi_info() if get_superx_dmi_info else {}
         tt_paths = find_tt_toggle_paths() if find_tt_toggle_paths else []
+        monitor_status = self.turbo_monitor.status() if self.turbo_monitor and hasattr(self.turbo_monitor, "status") else {}
         return {
             "enabled": self.turbo_overlay_enabled,
-            "running": self.turbo_monitor.is_running if self.turbo_monitor else False,
+            "running": bool(monitor_status.get("running", self.turbo_monitor.is_running if self.turbo_monitor else False)),
+            "watched_device_count": int(monitor_status.get("watched_device_count", 0) or 0),
+            "task_id": monitor_status.get("task_id"),
+            "debug_logging_enabled": self.debug_logging_enabled,
             "tt_toggle_startup_enabled": self.tt_toggle_startup_enabled,
             "tt_toggle_paths": tt_paths,
             "is_superx": (
@@ -800,10 +845,13 @@ class Plugin:
             else:
                 _log_warning("Cannot start Turbo watcher — module not loaded")
                 return {"success": False, "error": "superx_turbo module not loaded"}
+        if self.turbo_monitor.is_running:
+            return {"success": True, "message": "Turbo overlay watcher already running"}
         if not self.turbo_monitor.is_running:
             loop = asyncio.get_event_loop()
-            self.turbo_monitor.start(loop)
-            _log_info("Super X Turbo overlay watcher started")
+            started = self.turbo_monitor.start(loop)
+            if started:
+                _log_info("Super X Turbo overlay watcher started")
         return {"success": True, "message": "Turbo overlay watcher enabled"}
 
     async def _stop_turbo_monitor(self):
@@ -820,15 +868,19 @@ class Plugin:
             result = self._start_turbo_monitor()
             if result and not result.get("success"):
                 self.turbo_overlay_enabled = False
+                self._save_settings()
                 return result
+            self._save_settings()
             return result or {"success": True, "message": "Turbo overlay watcher enabled"}
         await self._stop_turbo_monitor()
+        self._save_settings()
         return {"success": True, "message": "Turbo overlay watcher disabled"}
 
     async def set_tt_toggle_startup_enabled(self, enabled: bool):
         self.tt_toggle_startup_enabled = bool(enabled)
         if self.tt_toggle_startup_enabled:
             result = await asyncio.to_thread(self._enable_tt_toggle)
+            self._save_settings()
             if result.get("success"):
                 return {"success": True, "message": "tt_toggle enabled"}
             return {
@@ -836,7 +888,15 @@ class Plugin:
                 "warning": result.get("error", "tt_toggle not available"),
                 "message": "tt_toggle will be enabled on startup when available",
             }
+        self._save_settings()
         return {"success": True, "message": "tt_toggle startup enable disabled"}
+
+    async def set_debug_logging_enabled(self, enabled: bool):
+        self.debug_logging_enabled = bool(enabled)
+        _set_helper_debug_logging(self.debug_logging_enabled)
+        self._save_settings()
+        _log_info(f"Debug logging {'enabled' if self.debug_logging_enabled else 'disabled'}")
+        return {"success": True, "message": f"Debug logging {'enabled' if self.debug_logging_enabled else 'disabled'}"}
 
     # -- oxpec EC Sensor Driver --
 
@@ -850,6 +910,7 @@ class Plugin:
             return {"success": False, "error": "oxpec_loader module not loaded"}
         _log_info("Installing oxpec driver...")
         try:
+            await self._stop_turbo_monitor()
             result = await asyncio.to_thread(apply_oxpec_impl)
             if result.get("success"):
                 _log_info(f"oxpec applied: {result.get('message', 'OK')}")
@@ -857,6 +918,8 @@ class Plugin:
                     await asyncio.to_thread(self._enable_tt_toggle)
                 # Restart HHD so it detects the new hwmon for fan control
                 await asyncio.to_thread(_restart_hhd)
+                if self.turbo_overlay_enabled:
+                    self._start_turbo_monitor()
             else:
                 _log_error(f"oxpec failed: {result.get('error', 'unknown')}")
             return result
@@ -869,12 +932,15 @@ class Plugin:
             return {"success": False, "error": "oxpec_loader module not loaded"}
         _log_info("Rebuilding oxpec driver for current kernel...")
         try:
+            await self._stop_turbo_monitor()
             result = await asyncio.to_thread(rebuild_oxpec_impl)
             if result.get("success"):
                 _log_info(f"oxpec rebuilt: {result.get('message', 'OK')}")
                 if self.tt_toggle_startup_enabled:
                     await asyncio.to_thread(self._enable_tt_toggle)
                 await asyncio.to_thread(_restart_hhd)
+                if self.turbo_overlay_enabled:
+                    self._start_turbo_monitor()
             else:
                 _log_error(f"oxpec rebuild failed: {result.get('error', 'unknown')}")
             return result
@@ -887,6 +953,7 @@ class Plugin:
             return {"success": False, "error": "oxpec_loader module not loaded"}
         _log_info("Removing oxpec driver...")
         try:
+            await self._stop_turbo_monitor()
             result = await asyncio.to_thread(revert_oxpec_impl)
             if result.get("success"):
                 _log_info(f"oxpec reverted: {result.get('message', 'OK')}")
